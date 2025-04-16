@@ -11,6 +11,7 @@ namespace ApplicationFramework {
         database: DatabaseConfig;
         caching: CacheConfig;
         api: ApiConfig;
+        telemetry: TelemetryConfig; // Added telemetry config
     }
 
     interface ModuleConfig {
@@ -91,6 +92,100 @@ namespace ApplicationFramework {
         config: Record<string, any>;
     }
 
+    // Add new telemetry system
+    interface TelemetryConfig {
+        enabled: boolean;
+        samplingRate: number;
+        endpoint: string;
+        bufferSize: number;
+        flushInterval: number;
+    }
+
+    class TelemetrySystem {
+        private buffer: TelemetryEvent[] = [];
+        private timer: NodeJS.Timer;
+
+        constructor(private config: TelemetryConfig) {
+            this.startFlushTimer();
+        }
+
+        public trackEvent(name: string, properties?: Record<string, any>): void {
+            if (!this.config.enabled || Math.random() > this.config.samplingRate) {
+                return;
+            }
+
+            const event: TelemetryEvent = {
+                name,
+                timestamp: new Date(),
+                properties,
+                sessionId: this.getCurrentSessionId(),
+                machineId: this.getMachineId(),
+                processId: process.pid
+            };
+
+            this.buffer.push(event);
+            if (this.buffer.length >= this.config.bufferSize) {
+                this.flush();
+            }
+        }
+
+        public trackMetric(name: string, value: number, tags?: Record<string, string>): void {
+            this.trackEvent('metric', { name, value, tags });
+        }
+
+        public trackException(error: Error, properties?: Record<string, any>): void {
+            this.trackEvent('exception', {
+                ...properties,
+                errorName: error.name,
+                message: error.message,
+                stack: error.stack
+            });
+        }
+
+        private async flush(): Promise<void> {
+            if (this.buffer.length === 0) return;
+
+            const events = [...this.buffer];
+            this.buffer = [];
+
+            try {
+                await fetch(this.config.endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(events)
+                });
+            } catch (error) {
+                console.error('Failed to flush telemetry:', error);
+            }
+        }
+
+        private startFlushTimer(): void {
+            this.timer = setInterval(() => this.flush(), this.config.flushInterval);
+        }
+
+        private getCurrentSessionId(): string {
+            return `session_${Date.now()}`;
+        }
+
+        private getMachineId(): string {
+            return `machine_${os.hostname()}`;
+        }
+
+        public async stop(): Promise<void> {
+            clearInterval(this.timer);
+            await this.flush();
+        }
+    }
+
+    interface TelemetryEvent {
+        name: string;
+        timestamp: Date;
+        properties?: Record<string, any>;
+        sessionId: string;
+        machineId: string;
+        processId: number;
+    }
+
     // Core Application Class
     export class Application {
         private readonly config: IApplicationConfig;
@@ -102,6 +197,7 @@ namespace ApplicationFramework {
         private readonly database: Database;
         private readonly cache: Cache;
         private readonly security: Security;
+        private readonly telemetry: TelemetrySystem; // Added telemetry system
         private isInitialized: boolean = false;
 
         constructor(config: IApplicationConfig) {
@@ -115,6 +211,7 @@ namespace ApplicationFramework {
             this.database = new Database(config.database);
             this.cache = new Cache(config.caching);
             this.security = new Security(config.security);
+            this.telemetry = new TelemetrySystem(config.telemetry); // Initialize telemetry system
         }
 
         private validateConfig(config: IApplicationConfig): void {
@@ -154,6 +251,7 @@ namespace ApplicationFramework {
             this.container.register('cache', this.cache);
             this.container.register('security', this.security);
             this.container.register('router', this.router);
+            this.container.register('telemetry', this.telemetry); // Register telemetry system
         }
 
         private async initializeDatabase(): Promise<void> {
@@ -240,6 +338,9 @@ namespace ApplicationFramework {
 
                 // Close cache connection
                 await this.cache.disconnect();
+
+                // Stop telemetry system
+                await this.telemetry.stop();
 
                 this.logger.info('Application stopped successfully');
             } catch (error) {
