@@ -386,4 +386,109 @@ interface Item {
   console.log("Is 4 even?", isEven(4));
   console.log("Is 7 even?", isEven(7));
   
+interface BatchProcessingMetrics {
+    batchId: string;
+    itemCount: number;
+    processedCount: number;
+    errorCount: number;
+    startTime: Date;
+    endTime?: Date;
+    status: 'processing' | 'completed' | 'failed';
+}
+
+class BatchProcessor {
+    private activeBatches: Map<string, BatchProcessingMetrics> = new Map();
+    private readonly maxConcurrentBatches = 5;
+    private batchQueue: Array<{ id: string; data: any[] }> = [];
+
+    public async processBatch(data: any[]): Promise<BatchProcessingMetrics> {
+        const batchId = this.generateBatchId();
+        
+        if (this.activeBatches.size >= this.maxConcurrentBatches) {
+            await this.queueBatch(batchId, data);
+            return this.getBatchMetrics(batchId);
+        }
+
+        return this.startBatchProcessing(batchId, data);
+    }
+
+    private async queueBatch(batchId: string, data: any[]): Promise<void> {
+        this.batchQueue.push({ id: batchId, data });
+        this.activeBatches.set(batchId, {
+            batchId,
+            itemCount: data.length,
+            processedCount: 0,
+            errorCount: 0,
+            startTime: new Date(),
+            status: 'processing'
+        });
+    }
+
+    private async startBatchProcessing(batchId: string, data: any[]): Promise<BatchProcessingMetrics> {
+        const metrics: BatchProcessingMetrics = {
+            batchId,
+            itemCount: data.length,
+            processedCount: 0,
+            errorCount: 0,
+            startTime: new Date(),
+            status: 'processing'
+        };
+        
+        this.activeBatches.set(batchId, metrics);
+
+        try {
+            const results = await Promise.allSettled(
+                data.map(item => this.processItem(item))
+            );
+
+            metrics.processedCount = results.filter(r => r.status === 'fulfilled').length;
+            metrics.errorCount = results.filter(r => r.status === 'rejected').length;
+            metrics.status = 'completed';
+        } catch (error) {
+            metrics.status = 'failed';
+            console.error(`Batch ${batchId} failed:`, error);
+        } finally {
+            metrics.endTime = new Date();
+            this.activeBatches.set(batchId, metrics);
+            this.processNextBatch();
+        }
+
+        return metrics;
+    }
+
+    private async processNextBatch(): Promise<void> {
+        if (this.batchQueue.length === 0) return;
+        
+        const nextBatch = this.batchQueue.shift();
+        if (nextBatch) {
+            await this.startBatchProcessing(nextBatch.id, nextBatch.data);
+        }
+    }
+
+    private async processItem(item: any): Promise<void> {
+        // Implementation of item processing
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    private generateBatchId(): string {
+        return `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    public getBatchMetrics(batchId: string): BatchProcessingMetrics {
+        const metrics = this.activeBatches.get(batchId);
+        if (!metrics) {
+            throw new Error(`No metrics found for batch ${batchId}`);
+        }
+        return metrics;
+    }
+
+    public getActiveBatchesCount(): number {
+        return this.activeBatches.size;
+    }
+
+    public getQueueLength(): number {
+        return this.batchQueue.length;
+    }
+}
+
 export default DataProcessor;
