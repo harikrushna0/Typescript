@@ -326,6 +326,47 @@ class AnalyticsEngine {
             }
         }, 5000);
     }
+
+    // Enhanced event processing with batching and rate limiting
+    private async processBatchWithRetry(events: AnalyticsEvent[]): Promise<void> {
+        const maxRetries = 3;
+        const backoffMs = 1000;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const chunks = this.chunkArray(events, this.config.maxEventsPerSecond);
+                
+                for (const chunk of chunks) {
+                    await this.processEventChunk(chunk);
+                    await this.delay(1000); // Rate limiting
+                }
+                return;
+            } catch (error) {
+                if (attempt === maxRetries) throw error;
+                await this.delay(backoffMs * attempt);
+            }
+        }
+    }
+
+    private async processEventChunk(events: AnalyticsEvent[]): Promise<void> {
+        const startTime = Date.now();
+        
+        try {
+            await Promise.all([
+                this.storeEventsWithValidation(events),
+                this.updateMetricsInParallel(events),
+                this.processAlertsInBatch(events)
+            ]);
+
+            const duration = Date.now() - startTime;
+            await this.trackPerformanceMetrics(duration, events.length);
+        } catch (error) {
+            this.handleProcessingError(error as Error, events);
+            throw error;
+        }
+    }
+
+    // Additional implementation...
 }
 
 class DataSource {

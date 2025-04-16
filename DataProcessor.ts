@@ -248,6 +248,50 @@ class DataProcessor {
         }
         return stats;
     }
+
+    // Enhanced data processing with validation and error handling
+    private async validateAndEnrichDataPoints(dataPoints: DataPoint[]): Promise<DataPoint[]> {
+        const validationPromises = dataPoints.map(async dp => {
+            try {
+                if (this.validateDataPoint(dp)) {
+                    const enrichedData = await this.enrichDataPoint(dp);
+                    return {
+                        isValid: true,
+                        data: enrichedData
+                    };
+                }
+                return { isValid: false, data: dp };
+            } catch (error) {
+                this.handleError(error as Error, dp);
+                return { isValid: false, data: dp };
+            }
+        });
+
+        const results = await Promise.all(validationPromises);
+        return results
+            .filter(r => r.isValid)
+            .map(r => r.data);
+    }
+
+    private async enrichDataPoint(dp: DataPoint): Promise<DataPoint> {
+        const enriched = { ...dp };
+        enriched.metadata = {
+            ...enriched.metadata,
+            processedAt: new Date(),
+            validationLevel: 'enhanced',
+            processingVersion: '2.0'
+        };
+
+        // Add statistical analysis
+        if (this.hasHistoricalData(dp.category)) {
+            const stats = await this.calculateCategoryStatistics(dp.category);
+            enriched.metadata.categoryStats = stats;
+        }
+
+        return enriched;
+    }
+
+    // Additional implementation...
 }
 // Define an interface for a basic item
 interface Item {
