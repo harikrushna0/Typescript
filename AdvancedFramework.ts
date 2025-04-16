@@ -94,315 +94,182 @@ namespace AdvancedFramework {
 
     // Core Classes
     class Application {
-        private readonly config: IFrameworkConfig;
-        private readonly container: DependencyContainer;
-        private readonly logger: Logger;
-        private readonly modules: Map<string, Module>;
-        private readonly services: Map<string, Service>;
-        private readonly router: Router;
-        private readonly database: Database;
-        private readonly cache: Cache;
-        private readonly security: Security;
-        private readonly telemetry: TelemetrySystem;
-        private isInitialized: boolean = false;
+        private errorHandler: ErrorHandler;
+        private metrics: MetricsCollector;
+        private profiler: PerformanceProfiler;
+        private logger: Logger;
+        private config: ApplicationConfig;
 
-        constructor(config: IFrameworkConfig) {
+        constructor(config: ApplicationConfig) {
             this.validateConfig(config);
-            this.config = config;
-            this.container = new DependencyContainer();
-            this.logger = new Logger(config.logging);
-            this.modules = new Map();
-            this.services = new Map();
-            this.router = new Router();
-            this.database = new Database(config.database);
-            this.cache = new Cache(config.caching);
-            this.security = new Security(config.security);
-            this.telemetry = new TelemetrySystem(config.telemetry);
+            this.initializeCore(config);
+            this.setupErrorHandling();
+            this.setupMetrics();
+            this.setupProfiling();
         }
 
-        // Application Lifecycle Management
-        public async initialize(): Promise<void> {
-            if (this.isInitialized) {
-                throw new Error('Application is already initialized');
-            }
-
+        private async initializeCore(config: ApplicationConfig): Promise<void> {
+            // Core initialization logic
             try {
-                this.logger.info('Initializing application...');
-                await this.initializeComponents();
-                this.isInitialized = true;
-                this.logger.info('Application initialized successfully');
+                await this.initializeServices();
+                await this.initializeModules();
+                await this.initializeDatabase();
+                await this.initializeCache();
+                await this.initializeSecurity();
             } catch (error) {
-                this.logger.error('Failed to initialize application', error);
+                this.handleInitializationError(error);
                 throw error;
             }
         }
 
-        private async initializeComponents(): Promise<void> {
-            await Promise.all([
-                this.initializeContainer(),
-                this.initializeDatabase(),
-                this.initializeCache(),
-                this.initializeSecurity(),
-                this.initializeModules(),
-                this.initializeServices(),
-                this.initializeRouter(),
-                this.initializeTelemetry()
-            ]);
-        }
-
-        public async start(): Promise<void> {
-            if (!this.isInitialized) {
-                await this.initialize();
-            }
-
-            try {
-                this.logger.info('Starting application...');
-                await this.startComponents();
-                this.logger.info(`Application ${this.config.name} v${this.config.version} started successfully`);
-            } catch (error) {
-                this.logger.error('Failed to start application', error);
-                throw error;
-            }
-        }
-
-        private async startComponents(): Promise<void> {
-            await Promise.all([
-                this.startModules(),
-                this.startServices(),
-                this.startRouter()
-            ]);
-        }
-
-        public async stop(): Promise<void> {
-            try {
-                this.logger.info('Stopping application...');
-                await this.stopComponents();
-                this.logger.info('Application stopped successfully');
-            } catch (error) {
-                this.logger.error('Failed to stop application', error);
-                throw error;
-            }
-        }
-
-        private async stopComponents(): Promise<void> {
-            // Stop in reverse order
-            await this.stopRouter();
-            await this.stopServices();
-            await this.stopModules();
-            await this.database.disconnect();
-            await this.cache.disconnect();
-        }
-
-        // Module System Implementation
-        private async initializeModules(): Promise<void> {
-            const moduleOrder = this.calculateModuleDependencies();
-            
-            for (const moduleName of moduleOrder) {
-                const moduleConfig = this.config.modules.find(m => m.name === moduleName);
-                if (moduleConfig?.enabled) {
-                    await this.initializeModule(moduleConfig);
-                }
-            }
-        }
-
-        private calculateModuleDependencies(): string[] {
-            const visited = new Set<string>();
-            const visiting = new Set<string>();
-            const order: string[] = [];
-
-            const visit = (moduleName: string): void => {
-                if (visiting.has(moduleName)) {
-                    throw new Error(`Circular dependency detected in module: ${moduleName}`);
-                }
-                if (visited.has(moduleName)) return;
-
-                visiting.add(moduleName);
-                const module = this.config.modules.find(m => m.name === moduleName);
-                
-                if (module?.dependencies) {
-                    for (const dep of module.dependencies) {
-                        visit(dep);
-                    }
-                }
-
-                visiting.delete(moduleName);
-                visited.add(moduleName);
-                order.push(moduleName);
-            };
-
-            for (const module of this.config.modules) {
-                visit(module.name);
-            }
-
-            return order;
-        }
-
-        private async initializeModule(config: ModuleConfig): Promise<void> {
-            try {
-                const module = new Module(config, this.container);
-                await module.initialize();
-                this.modules.set(config.name, module);
-            } catch (error) {
-                throw new Error(`Failed to initialize module ${config.name}: ${error.message}`);
-            }
-        }
-
-        // Service Management
         private async initializeServices(): Promise<void> {
+            // Service initialization with dependency resolution
+            const services = new Map<string, Service>();
+            const dependencies = new DependencyGraph();
+
             for (const serviceConfig of this.config.services) {
                 try {
-                    const service = await this.initializeService(serviceConfig);
-                    this.services.set(serviceConfig.name, service);
+                    const service = await this.createService(serviceConfig);
+                    services.set(service.name, service);
+                    dependencies.addNode(service.name);
+
+                    for (const dep of service.dependencies) {
+                        dependencies.addEdge(service.name, dep);
+                    }
                 } catch (error) {
-                    throw new Error(`Failed to initialize service ${serviceConfig.name}: ${error.message}`);
+                    this.handleServiceInitError(error, serviceConfig);
+                    throw error;
                 }
             }
-        }
 
-        private async initializeService(config: ServiceConfig): Promise<Service> {
-            const service = new Service(config, this.container);
-            await service.initialize();
-            return service;
-        }
-
-        // Dependency Injection
-        private async initializeContainer(): Promise<void> {
-            this.container.register('logger', this.logger);
-            this.container.register('database', this.database);
-            this.container.register('cache', this.cache);
-            this.container.register('security', this.security);
-            this.container.register('router', this.router);
-            this.container.register('telemetry', this.telemetry);
-        }
-
-        // Error Handling
-        private handleError(error: Error, context: string): void {
-            this.logger.error(`Error in ${context}:`, error);
-            this.telemetry.trackException(error, { context });
-            
-            if (this.isInitialized) {
-                this.triggerErrorHandlers(error, context);
+            const initOrder = dependencies.getTopologicalSort();
+            for (const serviceName of initOrder) {
+                await this.startService(services.get(serviceName));
             }
         }
 
-        private triggerErrorHandlers(error: Error, context: string): void {
-            // Implement error handling strategies
+        private async startService(service: Service): Promise<void> {
+            try {
+                const startTime = performance.now();
+                await service.start();
+                const duration = performance.now() - startTime;
+
+                this.metrics.recordServiceStart(service.name, duration);
+                this.logger.info(`Service ${service.name} started in ${duration}ms`);
+            } catch (error) {
+                this.handleServiceStartError(error, service);
+                throw error;
+            }
         }
 
-        // Performance Monitoring
-        private initializePerformanceMonitoring(): void {
-            this.telemetry.trackMetric('cpu_usage', this.getCpuUsage());
-            this.telemetry.trackMetric('memory_usage', this.getMemoryUsage());
-            
-            setInterval(() => {
-                this.monitorPerformance();
-            }, 60000); // Monitor every minute
-        }
-
-        private monitorPerformance(): void {
-            const metrics = {
-                cpuUsage: this.getCpuUsage(),
-                memoryUsage: this.getMemoryUsage(),
-                activeConnections: this.getActiveConnections(),
-                requestsPerSecond: this.getRequestRate()
-            };
-
-            Object.entries(metrics).forEach(([key, value]) => {
-                this.telemetry.trackMetric(key, value);
+        private setupErrorHandling(): void {
+            this.errorHandler = new ErrorHandler({
+                onError: this.handleApplicationError.bind(this),
+                onFatalError: this.handleFatalError.bind(this),
+                onWarning: this.handleWarning.bind(this)
             });
+
+            process.on('uncaughtException', this.handleUncaughtException.bind(this));
+            process.on('unhandledRejection', this.handleUnhandledRejection.bind(this));
         }
 
-        // Security Features
-        private async initializeSecurity(): Promise<void> {
-            await this.security.initialize();
-            this.setupSecurityMiddleware();
-            this.initializeAuthProviders();
-            this.setupRateLimiting();
+        private handleApplicationError(error: Error, context: ErrorContext): void {
+            this.logger.error('Application error occurred', {
+                error: error.message,
+                stack: error.stack,
+                context
+            });
+
+            this.metrics.incrementError(error.name);
+            this.notifyAdministrators(error, context);
+
+            if (this.shouldAttemptRecovery(error)) {
+                this.attemptErrorRecovery(error, context);
+            }
         }
 
-        private setupSecurityMiddleware(): void {
-            this.router.use(this.security.authenticationMiddleware());
-            this.router.use(this.security.corsMiddleware());
-            this.router.use(this.security.xssProtectionMiddleware());
-            this.router.use(this.security.csrfProtectionMiddleware());
+        private shouldAttemptRecovery(error: Error): boolean {
+            // Implement recovery decision logic
+            return !this.isFatalError(error) && 
+                   this.hasRecoveryStrategy(error) &&
+                   this.getErrorCount(error.name) < this.config.maxRecoveryAttempts;
         }
 
-        // Database Operations
-        private async initializeDatabase(): Promise<void> {
+        private async attemptErrorRecovery(error: Error, context: ErrorContext): Promise<void> {
+            const strategy = this.getRecoveryStrategy(error);
             try {
-                await this.database.connect();
-                await this.setupDatabaseMigrations();
-                await this.validateDatabaseSchema();
-            } catch (error) {
-                throw new Error(`Database initialization failed: ${error.message}`);
+                await strategy.execute(context);
+                this.logger.info('Recovery successful', { error, context });
+            } catch (recoveryError) {
+                this.handleRecoveryFailure(recoveryError, error, context);
             }
         }
 
-        private async setupDatabaseMigrations(): Promise<void> {
-            // Implement database migrations
+        private setupMetrics(): void {
+            this.metrics = new MetricsCollector({
+                interval: this.config.metrics.interval,
+                capacity: this.config.metrics.capacity,
+                flushThreshold: this.config.metrics.flushThreshold
+            });
+
+            this.setupMetricsReporting();
+            this.setupHealthChecks();
         }
 
-        // Caching System
-        private async initializeCache(): Promise<void> {
+        private setupMetricsReporting(): void {
+            setInterval(() => {
+                const metrics = this.metrics.getSnapshot();
+                this.reportMetrics(metrics);
+
+                if (this.shouldAlertOnMetrics(metrics)) {
+                    this.triggerMetricsAlert(metrics);
+                }
+            }, this.config.metrics.reportingInterval);
+        }
+
+        private shouldAlertOnMetrics(metrics: MetricsSnapshot): boolean {
+            return metrics.errorRate > this.config.metrics.errorRateThreshold ||
+                   metrics.responseTime > this.config.metrics.responseTimeThreshold ||
+                   metrics.memoryUsage > this.config.metrics.memoryThreshold;
+        }
+
+        private setupProfiling(): void {
+            this.profiler = new PerformanceProfiler({
+                enabled: this.config.profiling.enabled,
+                sampleRate: this.config.profiling.sampleRate,
+                maxStackDepth: this.config.profiling.maxStackDepth
+            });
+
+            if (this.config.profiling.enabled) {
+                this.startProfiling();
+            }
+        }
+
+        private async startProfiling(): Promise<void> {
             try {
-                await this.cache.connect();
-                await this.setupCachePatterns();
+                await this.profiler.start();
+                this.setupProfilingHooks();
+                this.schedulePerfReports();
             } catch (error) {
-                throw new Error(`Cache initialization failed: ${error.message}`);
+                this.handleProfilingError(error);
             }
         }
 
-        private setupCachePatterns(): void {
-            // Implement caching patterns
+        private setupProfilingHooks(): void {
+            this.profiler.on('slowOperation', this.handleSlowOperation.bind(this));
+            this.profiler.on('memoryLeak', this.handleMemoryLeak.bind(this));
+            this.profiler.on('highCpu', this.handleHighCpu.bind(this));
         }
 
-        // API Routing
-        private async initializeRouter(): Promise<void> {
-            this.setupMiddleware();
-            this.setupRoutes();
-            this.setupErrorHandling();
-            this.setupDocumentation();
-        }
+        private handleSlowOperation(operation: ProfiledOperation): void {
+            this.logger.warn('Slow operation detected', {
+                operation: operation.name,
+                duration: operation.duration,
+                threshold: operation.threshold
+            });
 
-        private setupMiddleware(): void {
-            // Setup API middleware
-        }
-
-        // Telemetry Tracking
-        private async initializeTelemetry(): Promise<void> {
-            if (this.config.telemetry.enabled) {
-                await this.telemetry.initialize();
-                this.setupTelemetryHandlers();
-            }
-        }
-
-        private setupTelemetryHandlers(): void {
-            // Setup telemetry handlers
-        }
-
-        // Utility Methods
-        private validateConfig(config: IFrameworkConfig): void {
-            // Implement configuration validation
-        }
-
-        private getCpuUsage(): number {
-            // Implement CPU usage monitoring
-            return 0;
-        }
-
-        private getMemoryUsage(): number {
-            // Implement memory usage monitoring
-            return 0;
-        }
-
-        private getActiveConnections(): number {
-            // Implement connection monitoring
-            return 0;
-        }
-
-        private getRequestRate(): number {
-            // Implement request rate monitoring
-            return 0;
+            this.metrics.recordSlowOperation(operation);
+            this.analyzePerformanceImpact(operation);
         }
     }
 }
@@ -1337,4 +1204,4 @@ interface Task {
       );
     }
   }
-  
+

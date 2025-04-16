@@ -14,8 +14,141 @@ class UserManager {
     private activeUserSessions: Map<number, UserSession[]> = new Map();
     private readonly maxSessionsPerUser = 5;
 
-    constructor() {
+    private sessions: Map<string, UserSession>;
+    private activityMonitor: ActivityMonitor;
+    private securityManager: SecurityManager;
+
+    constructor(config: UserManagerConfig) {
         this.users = new Map<number, User>();
+        this.sessions = new Map();
+        this.initializeMonitoring(config);
+        this.setupSecurity(config);
+    }
+
+    private async initializeMonitoring(config: UserManagerConfig): Promise<void> {
+        this.activityMonitor = new ActivityMonitor({
+            trackingInterval: config.trackingInterval || 5000,
+            activityThreshold: config.activityThreshold || 300000,
+            maxInactiveTime: config.maxInactiveTime || 3600000
+        });
+
+        await this.setupActivityTracking();
+    }
+
+    private async setupActivityTracking(): Promise<void> {
+        this.activityMonitor.on('userActive', async (userId: string) => {
+            await this.handleUserActivity(userId);
+        });
+
+        this.activityMonitor.on('userInactive', async (userId: string) => {
+            await this.handleUserInactivity(userId);
+        });
+
+        this.activityMonitor.on('sessionExpired', async (sessionId: string) => {
+            await this.handleSessionExpiration(sessionId);
+        });
+    }
+
+    private async handleUserActivity(userId: string): Promise<void> {
+        const userSessions = Array.from(this.sessions.values())
+            .filter(session => session.userId === userId);
+
+        for (const session of userSessions) {
+            session.lastActivity = new Date();
+            await this.updateSessionMetrics(session);
+        }
+    }
+
+    private async handleUserInactivity(userId: string): Promise<void> {
+        const userSessions = Array.from(this.sessions.values())
+            .filter(session => session.userId === userId);
+
+        for (const session of userSessions) {
+            if (this.shouldTerminateSession(session)) {
+                await this.terminateSession(session.id, 'inactivity');
+            } else {
+                await this.sendInactivityWarning(session);
+            }
+        }
+    }
+
+    private shouldTerminateSession(session: UserSession): boolean {
+        const inactiveTime = Date.now() - session.lastActivity.getTime();
+        return inactiveTime > this.config.maxInactiveTime;
+    }
+
+    private async terminateSession(sessionId: string, reason: string): Promise<void> {
+        const session = this.sessions.get(sessionId);
+        if (!session) return;
+
+        try {
+            await this.securityManager.revokeSessionTokens(sessionId);
+            await this.cleanupSessionData(session);
+            this.sessions.delete(sessionId);
+
+            await this.notifySessionTermination(session, reason);
+            await this.logSessionEnd(session, reason);
+        } catch (error) {
+            await this.handleSessionError(session, error);
+        }
+    }
+
+    private async cleanupSessionData(session: UserSession): Promise<void> {
+        await Promise.all([
+            this.cache.delete(`session:${session.id}`),
+            this.cache.delete(`user:${session.userId}:activeSession`),
+            this.database.sessions.update({
+                id: session.id,
+                status: 'terminated',
+                endedAt: new Date()
+            })
+        ]);
+    }
+
+    private async updateSessionMetrics(session: UserSession): Promise<void> {
+        const metrics: SessionMetrics = {
+            duration: Date.now() - session.startTime.getTime(),
+            activityCount: session.activityCount,
+            lastActivity: session.lastActivity,
+            resourceUsage: await this.calculateResourceUsage(session)
+        };
+
+        await this.metrics.recordSessionMetrics(session.id, metrics);
+        await this.checkSessionThresholds(session, metrics);
+    }
+
+    private async calculateResourceUsage(session: UserSession): Promise<ResourceUsage> {
+        return {
+            memoryUsage: await this.getSessionMemoryUsage(session),
+            cpuTime: await this.getSessionCpuTime(session),
+            networkIO: await this.getSessionNetworkIO(session)
+        };
+    }
+
+    private async checkSessionThresholds(
+        session: UserSession, 
+        metrics: SessionMetrics
+    ): Promise<void> {
+        if (metrics.resourceUsage.memoryUsage > this.config.maxSessionMemory) {
+            await this.handleExcessiveMemoryUsage(session);
+        }
+
+        if (metrics.resourceUsage.cpuTime > this.config.maxSessionCpu) {
+            await this.handleExcessiveCpuUsage(session);
+        }
+
+        if (metrics.resourceUsage.networkIO > this.config.maxSessionNetwork) {
+            await this.handleExcessiveNetworkUsage(session);
+        }
+    }
+
+    private async handleExcessiveResourceUsage(
+        session: UserSession, 
+        resourceType: string
+    ): Promise<void> {
+        await this.notifyResourceWarning(session, resourceType);
+        await this.applyResourceRestrictions(session, resourceType);
+        await this.logResourceViolation(session, resourceType);
     }
 
     public addUser(user: User): boolean {
