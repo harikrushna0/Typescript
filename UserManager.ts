@@ -9,6 +9,11 @@ interface User {
 class UserManager {
     private users: Map<number, User>;
 
+    // Enhanced user management with validation and security
+    private userValidation: Map<string, ValidationRule[]> = new Map();
+    private activeUserSessions: Map<number, UserSession[]> = new Map();
+    private readonly maxSessionsPerUser = 5;
+
     constructor() {
         this.users = new Map<number, User>();
     }
@@ -50,7 +55,43 @@ class UserManager {
     public getUserCount(): number {
         return this.users.size;
     }
+
+    public async createUserWithValidation(user: User): Promise<Result<User, string>> {
+        try {
+            const validationResult = await this.validateUserData(user);
+            if (!validationResult.success) {
+                return { success: false, error: validationResult.error };
+            }
+
+            const existingUser = await this.findUserByEmail(user.email);
+            if (existingUser) {
+                return { success: false, error: 'Email already exists' };
+            }
+
+            const sanitizedUser = this.sanitizeUserData(user);
+            const createdUser = await this.createUserInDatabase(sanitizedUser);
+            
+            await this.initializeUserPermissions(createdUser);
+            this.notifyUserCreation(createdUser);
+            
+            return { success: true, data: createdUser };
+        } catch (error) {
+            return { 
+                success: false, 
+                error: `Failed to create user: ${error.message}` 
+            };
+        }
+    }
+
+    // Additional implementation...
 }
+
+interface Result<T, E> {
+    success: boolean;
+    data?: T;
+    error?: E;
+}
+
 // Define an interface for a basic item
 interface Item {
     id: number;

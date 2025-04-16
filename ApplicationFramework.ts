@@ -267,25 +267,58 @@ namespace ApplicationFramework {
         }
 
         private async initializeModules(): Promise<void> {
-            for (const moduleConfig of this.config.modules) {
-                if (moduleConfig.enabled) {
-                    const module = new Module(moduleConfig, this.container);
-                    await module.initialize();
-                    this.modules.set(moduleConfig.name, module);
+            const initOrder = this.calculateModuleDependencies();
+            
+            for (const moduleName of initOrder) {
+                const moduleConfig = this.config.modules.find(m => m.name === moduleName);
+                if (moduleConfig && moduleConfig.enabled) {
+                    try {
+                        this.logger.info(`Initializing module: ${moduleName}`);
+                        const module = new Module(moduleConfig, this.container);
+                        await module.initialize();
+                        this.modules.set(moduleName, module);
+                        this.telemetry.trackEvent('module_initialized', { 
+                            moduleName,
+                            success: true 
+                        });
+                    } catch (error) {
+                        this.telemetry.trackException(error as Error, { moduleName });
+                        throw new Error(`Failed to initialize module ${moduleName}: ${error.message}`);
+                    }
                 }
             }
         }
 
-        private async initializeServices(): Promise<void> {
-            for (const serviceConfig of this.config.services) {
-                const service = new Service(serviceConfig, this.container);
-                await service.initialize();
-                this.services.set(serviceConfig.name, service);
-            }
-        }
+        private calculateModuleDependencies(): string[] {
+            const visited = new Set<string>();
+            const visiting = new Set<string>();
+            const order: string[] = [];
 
-        private async initializeRouter(): Promise<void> {
-            await this.router.initialize(this.config.api);
+            const visit = (moduleName: string) => {
+                if (visiting.has(moduleName)) {
+                    throw new Error(`Circular dependency detected for module: ${moduleName}`);
+                }
+                if (visited.has(moduleName)) return;
+
+                visiting.add(moduleName);
+                const module = this.config.modules.find(m => m.name === moduleName);
+                
+                if (module?.dependencies) {
+                    for (const dep of module.dependencies) {
+                        visit(dep);
+                    }
+                }
+
+                visiting.delete(moduleName);
+                visited.add(moduleName);
+                order.push(moduleName);
+            };
+
+            for (const module of this.config.modules) {
+                visit(module.name);
+            }
+
+            return order;
         }
 
         public async start(): Promise<void> {
