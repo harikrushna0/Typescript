@@ -1123,4 +1123,139 @@ class AlertManager {
     }
 }
 
+class RealTimeMetricsProcessor {
+    private metricsBuffer: MetricsBuffer;
+    private alertManager: AlertManager;
+    private readonly processingInterval: number;
+    private readonly batchSize: number;
+
+    constructor(config: ProcessorConfig) {
+        this.metricsBuffer = new MetricsBuffer(config.bufferSize);
+        this.alertManager = new AlertManager(config.alerts);
+        this.processingInterval = config.processingInterval;
+        this.batchSize = config.batchSize;
+        this.initializeProcessor();
+    }
+
+    private initializeProcessor(): void {
+        setInterval(() => {
+            this.processBatch();
+        }, this.processingInterval);
+    }
+
+    public async addMetric(metric: Metric): Promise<void> {
+        await this.metricsBuffer.add(metric);
+        await this.checkThresholds(metric);
+    }
+
+    private async processBatch(): Promise<void> {
+        const batch = await this.metricsBuffer.getBatch(this.batchSize);
+        if (batch.length === 0) return;
+
+        try {
+            await this.validateBatch(batch);
+            await this.transformBatch(batch);
+            await this.aggregateBatch(batch);
+            await this.storeBatch(batch);
+        } catch (error) {
+            await this.handleProcessingError(error, batch);
+        }
+    }
+
+    private async validateBatch(batch: Metric[]): Promise<void> {
+        const validationResults = await Promise.all(
+            batch.map(metric => this.validateMetric(metric))
+        );
+
+        const invalidMetrics = validationResults
+            .filter(result => !result.isValid)
+            .map(result => result.metric);
+
+        if (invalidMetrics.length > 0) {
+            await this.handleInvalidMetrics(invalidMetrics);
+            throw new ValidationError('Invalid metrics in batch');
+        }
+    }
+
+    private async validateMetric(metric: Metric): Promise<ValidationResult> {
+        const schema = this.getMetricSchema(metric.type);
+        const result = await schema.validate(metric);
+
+        return {
+            isValid: result.valid,
+            metric,
+            errors: result.errors
+        };
+    }
+
+    private async transformBatch(batch: Metric[]): Promise<void> {
+        const transformedBatch = await Promise.all(
+            batch.map(metric => this.transformMetric(metric))
+        );
+
+        batch.splice(0, batch.length, ...transformedBatch);
+    }
+
+    private async transformMetric(metric: Metric): Promise<Metric> {
+        const transformer = this.getMetricTransformer(metric.type);
+        return await transformer.transform(metric);
+    }
+
+    private async aggregateBatch(batch: Metric[]): Promise<void> {
+        const aggregations = new Map<string, MetricAggregation>();
+
+        for (const metric of batch) {
+            const key = this.getAggregationKey(metric);
+            const current = aggregations.get(key) || this.createAggregation();
+            
+            this.updateAggregation(current, metric);
+            aggregations.set(key, current);
+        }
+
+        await this.storeAggregations(Array.from(aggregations.values()));
+    }
+
+    private getAggregationKey(metric: Metric): string {
+        return `${metric.type}:${metric.source}:${this.getTimeWindow(metric.timestamp)}`;
+    }
+
+    private updateAggregation(agg: MetricAggregation, metric: Metric): void {
+        agg.count++;
+        agg.sum += metric.value;
+        agg.min = Math.min(agg.min, metric.value);
+        agg.max = Math.max(agg.max, metric.value);
+        agg.sumSquares += metric.value * metric.value;
+    }
+
+    private async storeBatch(batch: Metric[]): Promise<void> {
+        const storageOps = batch.map(metric => ({
+            timestamp: new Date(),
+            data: metric,
+            metadata: this.getMetricMetadata(metric)
+        }));
+
+        await this.storage.storeBatch(storageOps);
+        await this.updateMetricsStats(batch);
+    }
+
+    private async checkThresholds(metric: Metric): Promise<void> {
+        const thresholds = await this.getMetricThresholds(metric.type);
+        
+        for (const threshold of thresholds) {
+            if (this.isThresholdViolated(metric, threshold)) {
+                await this.handleThresholdViolation(metric, threshold);
+            }
+        }
+    }
+
+    private async handleThresholdViolation(
+        metric: Metric,
+        threshold: MetricThreshold
+    ): Promise<void> {
+        const alert = this.createAlert(metric, threshold);
+        await this.alertManager.sendAlert(alert);
+        await this.recordViolation(metric, threshold);
+    }
+}
+
 export default AnalyticsEngine;

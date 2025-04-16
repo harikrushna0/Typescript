@@ -9,8 +9,6 @@ namespace EnterpriseService {
         monitoring: MonitoringConfig;
         recovery: RecoveryConfig;
         networking: NetworkConfig;
-        storage: StorageConfig;
-        security: SecurityConfig;
     }
 
     type ServiceType = 'web' | 'worker' | 'api' | 'scheduled';
@@ -66,50 +64,103 @@ namespace EnterpriseService {
         private recovery: RecoveryManager;
 
         constructor(private config: IServiceConfig) {
-            this.initializeServices();
-            this.setupMonitoring();
-            this.configureRecovery();
-        }
-
-        private initializeServices(): void {
             this.services = new Map();
+            this.monitor = new ServiceMonitor(config.monitoring);
             this.scheduler = new ServiceScheduler();
-            this.monitor = new ServiceMonitor(this.config.monitoring);
-            this.recovery = new RecoveryManager(this.config.recovery);
+            this.recovery = new RecoveryManager(config.recovery);
+            this.initializeServices();
         }
 
-        public async startService(serviceId: string): Promise<void> {
-            const service = this.services.get(serviceId);
-            if (!service) {
-                throw new Error(`Service ${serviceId} not found`);
+        private async initializeServices(): Promise<void> {
+            try {
+                await this.startCoreServices();
+                await this.startDependentServices();
+                await this.startOptionalServices();
+            } catch (error) {
+                await this.handleInitializationError(error);
+                throw error;
             }
+        }
+
+        private async startCoreServices(): Promise<void> {
+            const coreServices = Array.from(this.services.values())
+                .filter(service => service.type === 'core');
+
+            for (const service of coreServices) {
+                await this.startServiceWithRetry(service);
+            }
+        }
+
+        private async startServiceWithRetry(service: Service): Promise<void> {
+            const maxRetries = this.config.recovery.maxRetries;
+            let attempt = 0;
+
+            while (attempt < maxRetries) {
+                try {
+                    await this.startService(service);
+                    return;
+                } catch (error) {
+                    attempt++;
+                    if (attempt === maxRetries) {
+                        throw new Error(`Failed to start service ${service.name} after ${maxRetries} attempts`);
+                    }
+                    await this.delay(this.calculateBackoff(attempt));
+                }
+            }
+        }
+
+        private calculateBackoff(attempt: number): number {
+            switch (this.config.recovery.backoffStrategy) {
+                case 'linear':
+                    return attempt * 1000;
+                case 'exponential':
+                    return Math.pow(2, attempt) * 1000;
+                default:
+                    return 1000;
+            }
+        }
+
+        private async startService(service: Service): Promise<void> {
+            const startTime = Date.now();
 
             try {
                 await this.validateDependencies(service);
                 await this.allocateResources(service);
+                await this.initializeService(service);
                 await this.startServiceInstance(service);
-                await this.monitorHealth(service);
+                
+                const duration = Date.now() - startTime;
+                await this.monitor.recordServiceStart(service.name, {
+                    duration,
+                    success: true
+                });
             } catch (error) {
-                await this.handleStartupError(service, error);
+                const duration = Date.now() - startTime;
+                await this.monitor.recordServiceStart(service.name, {
+                    duration,
+                    success: false,
+                    error: error.message
+                });
+                throw error;
             }
         }
 
         private async validateDependencies(service: Service): Promise<void> {
-            const dependencies = service.config.dependencies;
-            
-            for (const dep of dependencies) {
+            for (const dep of service.dependencies) {
                 const dependentService = this.services.get(dep.name);
                 if (!dependentService) {
-                    throw new Error(`Required dependency ${dep.name} not found`);
+                    throw new Error(`Missing dependency: ${dep.name}`);
                 }
 
                 if (!this.isServiceHealthy(dependentService)) {
-                    if (dep.type === 'required') {
-                        throw new Error(`Required dependency ${dep.name} is unhealthy`);
-                    }
-                    this.logger.warn(`Optional dependency ${dep.name} is unhealthy`);
+                    throw new Error(`Dependency ${dep.name} is unhealthy`);
                 }
             }
+        }
+
+        private isServiceHealthy(service: Service): boolean {
+            return service.status === 'running' && 
+                   service.health.status === 'healthy';
         }
 
         private async allocateResources(service: Service): Promise<void> {
@@ -120,42 +171,25 @@ namespace EnterpriseService {
             });
 
             if (!resources.success) {
-                throw new Error(`Failed to allocate resources: ${resources.error}`);
+                throw new Error(`Resource allocation failed: ${resources.error}`);
             }
 
             service.resources = resources.allocated;
-            await this.monitor.trackResources(service.id, resources.allocated);
+            await this.monitor.trackResources(service.name, resources.allocated);
         }
 
-        private async startServiceInstance(service: Service): Promise<void> {
-            const startTime = Date.now();
-            
-            try {
-                await service.initialize();
-                await service.start();
-                
-                const startupDuration = Date.now() - startTime;
-                await this.monitor.recordStartup(service.id, {
-                    duration: startupDuration,
-                    success: true
-                });
-
-            } catch (error) {
-                const startupDuration = Date.now() - startTime;
-                await this.monitor.recordStartup(service.id, {
-                    duration: startupDuration,
-                    success: false,
-                    error: error.message
-                });
-                throw error;
-            }
+        private async initializeService(service: Service): Promise<void> {
+            await service.initialize();
+            await this.setupServiceMonitoring(service);
+            await this.setupErrorHandling(service);
+            await this.setupMetrics(service);
         }
 
-        private async monitorHealth(service: Service): Promise<void> {
+        private async setupServiceMonitoring(service: Service): Promise<void> {
             const healthCheck = async () => {
                 try {
                     const health = await service.checkHealth();
-                    await this.monitor.recordHealth(service.id, health);
+                    await this.monitor.recordHealth(service.name, health);
 
                     if (!health.healthy) {
                         await this.handleUnhealthyService(service, health);
@@ -165,10 +199,6 @@ namespace EnterpriseService {
                 }
             };
 
-            // Initial health check
-            await healthCheck();
-
-            // Setup periodic health checks
             setInterval(healthCheck, this.config.monitoring.healthCheckInterval);
         }
 
@@ -176,7 +206,7 @@ namespace EnterpriseService {
             service: Service, 
             health: HealthStatus
         ): Promise<void> {
-            this.logger.warn(`Service ${service.id} is unhealthy`, {
+            this.logger.warn(`Service ${service.name} is unhealthy`, {
                 metrics: health.metrics,
                 timestamp: new Date()
             });
@@ -188,75 +218,10 @@ namespace EnterpriseService {
             if (health.metrics.memory > this.config.monitoring.memoryThreshold) {
                 await this.recovery.initiateMemoryRecovery(service);
             }
-
-            if (health.metrics.responseTime > this.config.monitoring.latencyThreshold) {
-                await this.recovery.initiatePerformanceRecovery(service);
-            }
-        }
-
-        private async handleStartupError(
-            service: Service, 
-            error: Error
-        ): Promise<void> {
-            this.logger.error(`Failed to start service ${service.id}`, {
-                error: error.message,
-                timestamp: new Date()
-            });
-
-            await this.monitor.recordIncident({
-                serviceId: service.id,
-                type: 'StartupFailure',
-                error: error.message,
-                timestamp: new Date()
-            });
-
-            if (await this.shouldRetryStartup(service)) {
-                await this.retryServiceStart(service);
-            } else {
-                await this.handleFatalStartupFailure(service);
-            }
-        }
-
-        private async shouldRetryStartup(service: Service): Promise<boolean> {
-            const attempts = await this.monitor.getStartupAttempts(service.id);
-            return attempts < this.config.recovery.maxRetries;
-        }
-
-        private async retryServiceStart(service: Service): Promise<void> {
-            const delay = this.calculateRetryDelay(service);
-            await this.scheduler.scheduleRetry(service.id, delay);
-        }
-
-        private calculateRetryDelay(service: Service): number {
-            const attempts = this.monitor.getStartupAttempts(service.id);
-            
-            switch (this.config.recovery.backoffStrategy) {
-                case 'linear':
-                    return attempts * 1000;
-                case 'exponential':
-                    return Math.pow(2, attempts) * 1000;
-                default:
-                    return 1000;
-            }
-        }
-
-        private async handleFatalStartupFailure(service: Service): Promise<void> {
-            await this.monitor.recordFatalError({
-                serviceId: service.id,
-                type: 'FatalStartupFailure',
-                timestamp: new Date()
-            });
-
-            await this.notifyAdministrators({
-                service: service.id,
-                error: 'Fatal startup failure',
-                timestamp: new Date()
-            });
-
-            await this.cleanup(service);
         }
     }
 }
+
 /**
  * Interface for inquirer prompt answers
  * @version 1.0.0
