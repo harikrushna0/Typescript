@@ -184,5 +184,48 @@ interface Item {
   
   console.log("Is 4 even?", isEven(4));
   console.log("Is 7 even?", isEven(7));
-  
+
+interface UserActivity {
+    userId: string;
+    action: string;
+    timestamp: Date;
+    metadata: Record<string, any>;
+    sessionId: string;
+}
+
+class UserActivityTracker {
+    private activities: UserActivity[] = [];
+    private readonly maxActivityHistory = 1000;
+    private analytics: AnalyticsEngine;
+
+    constructor(analytics: AnalyticsEngine) {
+        this.analytics = analytics;
+        this.startCleanupTask();
+    }
+
+    public trackActivity(activity: UserActivity): void {
+        this.activities.push(activity);
+        this.analytics.trackEvent({
+            type: 'user_activity',
+            data: activity
+        });
+
+        if (this.activities.length > this.maxActivityHistory) {
+            this.activities.shift();
+        }
+
+        this.analyzeUserBehavior(activity);
+    }
+
+    private analyzeUserBehavior(activity: UserActivity): void {
+        const userActivities = this.activities.filter(a => a.userId === activity.userId);
+        const sessionActivities = userActivities.filter(a => a.sessionId === activity.sessionId);
+
+        // Analyze session length
+        if (sessionActivities.length > 1) {
+            const sessionLength = activity.timestamp.getTime() -
+        }
+    }
+}
+
 export default UserManager;

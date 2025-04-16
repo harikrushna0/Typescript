@@ -71,6 +71,77 @@ interface AggregateResult {
     dimensions?: Record<string, string>;
 }
 
+interface RealTimeMetrics {
+    eventCount: number;
+    processingTime: number;
+    errorRate: number;
+    timestamp: Date;
+}
+
+class RealTimeAnalytics {
+    private metrics: RealTimeMetrics[] = [];
+    private readonly retentionPeriod = 24 * 60 * 60 * 1000; // 24 hours
+
+    public trackEvent(processingTime: number, hasError: boolean): void {
+        const currentMetric = this.getCurrentMetric();
+        currentMetric.eventCount++;
+        currentMetric.processingTime += processingTime;
+        if (hasError) {
+            currentMetric.errorRate = currentMetric.eventCount === 0 ? 
+                1 : (currentMetric.errorRate * (currentMetric.eventCount - 1) + 1) / currentMetric.eventCount;
+        }
+    }
+
+    private getCurrentMetric(): RealTimeMetrics {
+        const current = this.metrics[this.metrics.length - 1];
+        if (!current || Date.now() - current.timestamp.getTime() > 60000) {
+            const newMetric: RealTimeMetrics = {
+                eventCount: 0,
+                processingTime: 0,
+                errorRate: 0,
+                timestamp: new Date()
+            };
+            this.metrics.push(newMetric);
+            this.cleanupOldMetrics();
+            return newMetric;
+        }
+        return current;
+    }
+
+    private cleanupOldMetrics(): void {
+        const cutoffTime = Date.now() - this.retentionPeriod;
+        this.metrics = this.metrics.filter(m => m.timestamp.getTime() > cutoffTime);
+    }
+
+    public getAnalyticsSummary(timeRange: number): {
+        totalEvents: number;
+        avgProcessingTime: number;
+        avgErrorRate: number;
+    } {
+        const relevantMetrics = this.metrics.filter(
+            m => m.timestamp.getTime() > Date.now() - timeRange
+        );
+
+        if (relevantMetrics.length === 0) {
+            return {
+                totalEvents: 0,
+                avgProcessingTime: 0,
+                avgErrorRate: 0
+            };
+        }
+
+        const totalEvents = relevantMetrics.reduce((sum, m) => sum + m.eventCount, 0);
+        const totalProcessingTime = relevantMetrics.reduce((sum, m) => sum + m.processingTime, 0);
+        const avgErrorRate = relevantMetrics.reduce((sum, m) => sum + m.errorRate, 0) / relevantMetrics.length;
+
+        return {
+            totalEvents,
+            avgProcessingTime: totalEvents === 0 ? 0 : totalProcessingTime / totalEvents,
+            avgErrorRate
+        };
+    }
+}
+
 class AnalyticsEngine {
     private config: AnalyticsConfig;
     private events: AnalyticsEvent[];
@@ -81,6 +152,7 @@ class AnalyticsEngine {
     private isRunning: boolean;
     private eventBuffer: AnalyticsEvent[];
     private readonly bufferSize: number = 1000;
+    private realTimeAnalytics: RealTimeAnalytics;
 
     constructor(config: AnalyticsConfig) {
         this.validateConfig(config);
@@ -92,6 +164,7 @@ class AnalyticsEngine {
         this.alerting = new AlertManager(config.alertingConfig);
         this.isRunning = false;
         this.eventBuffer = [];
+        this.realTimeAnalytics = new RealTimeAnalytics();
         this.initialize();
     }
 

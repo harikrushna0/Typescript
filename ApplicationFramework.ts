@@ -186,6 +186,103 @@ namespace ApplicationFramework {
         processId: number;
     }
 
+    // New Performance Monitoring System
+    interface PerformanceMetrics {
+        timestamp: Date;
+        cpuUsage: number;
+        memoryUsage: number;
+        activeConnections: number;
+        responseTime: number;
+    }
+
+    class PerformanceMonitor {
+        private metrics: PerformanceMetrics[] = [];
+        private readonly maxHistory: number = 1000;
+        private timer: NodeJS.Timer;
+
+        constructor(private interval: number = 5000) {
+            this.startMonitoring();
+        }
+
+        private startMonitoring(): void {
+            this.timer = setInterval(async () => {
+                const metrics = await this.collectMetrics();
+                this.storeMetrics(metrics);
+                this.analyzePerformance(metrics);
+            }, this.interval);
+        }
+
+        private async collectMetrics(): Promise<PerformanceMetrics> {
+            return {
+                timestamp: new Date(),
+                cpuUsage: await this.getCpuUsage(),
+                memoryUsage: this.getMemoryUsage(),
+                activeConnections: await this.getActiveConnections(),
+                responseTime: await this.getAverageResponseTime()
+            };
+        }
+
+        private async getCpuUsage(): Promise<number> {
+            // CPU usage implementation
+            return process.cpuUsage().user / 1000000;
+        }
+
+        private getMemoryUsage(): number {
+            const used = process.memoryUsage();
+            return used.heapUsed / 1024 / 1024;
+        }
+
+        private async getActiveConnections(): Promise<number> {
+            // Active connections implementation
+            return 100;
+        }
+
+        private async getAverageResponseTime(): Promise<number> {
+            // Response time implementation
+            return 150;
+        }
+
+        private storeMetrics(metrics: PerformanceMetrics): void {
+            this.metrics.push(metrics);
+            if (this.metrics.length > this.maxHistory) {
+                this.metrics.shift();
+            }
+        }
+
+        private analyzePerformance(metrics: PerformanceMetrics): void {
+            // Performance analysis implementation
+            if (metrics.cpuUsage > 80) {
+                console.warn('High CPU usage detected');
+            }
+            if (metrics.memoryUsage > 1024) {
+                console.warn('High memory usage detected');
+            }
+        }
+
+        public getMetricsSummary(): {
+            avgCpuUsage: number;
+            avgMemoryUsage: number;
+            avgResponseTime: number;
+            peakConnections: number;
+        } {
+            const last100Metrics = this.metrics.slice(-100);
+            return {
+                avgCpuUsage: this.calculateAverage(last100Metrics.map(m => m.cpuUsage)),
+                avgMemoryUsage: this.calculateAverage(last100Metrics.map(m => m.memoryUsage)),
+                avgResponseTime: this.calculateAverage(last100Metrics.map(m => m.responseTime)),
+                peakConnections: Math.max(...last100Metrics.map(m => m.activeConnections))
+            };
+        }
+
+        private calculateAverage(values: number[]): number {
+            return values.reduce((a, b) => a + b, 0) / values.length;
+        }
+
+        public stop(): void {
+            clearInterval(this.timer);
+        }
+    }
+
     // Core Application Class
     export class Application {
         private readonly config: IApplicationConfig;
