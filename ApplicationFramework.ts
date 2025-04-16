@@ -185,6 +185,348 @@ namespace ApplicationFramework {
         machineId: string;
         processId: number;
     }
+    
+// task-management-system.ts
+
+// Type definitions
+interface Task {
+    id: string;
+    title: string;
+    description: string;
+    dueDate: Date;
+    completed: boolean;
+    priority: 'low' | 'medium' | 'high';
+    tags: string[];
+    createdAt: Date;
+    updatedAt: Date;
+  }
+  
+  interface TaskFilter {
+    title?: string;
+    completed?: boolean;
+    priority?: 'low' | 'medium' | 'high';
+    tags?: string[];
+    dueBefore?: Date;
+    dueAfter?: Date;
+  }
+  
+  interface TaskStatistics {
+    total: number;
+    completed: number;
+    overdue: number;
+    priorityDistribution: {
+      low: number;
+      medium: number;
+      high: number;
+    };
+    tagDistribution: Map<string, number>;
+  }
+  
+  // Utility functions
+  function generateId(): string {
+    return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+  }
+  
+  function formatDate(date: Date): string {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+  
+  function isTaskOverdue(task: Task): boolean {
+    if (task.completed) return false;
+    return task.dueDate < new Date();
+  }
+  
+  class TaskManager {
+    private tasks: Map<string, Task> = new Map();
+    private eventListeners: Map<string, Function[]> = new Map();
+  
+    constructor(initialTasks: Task[] = []) {
+      initialTasks.forEach(task => this.tasks.set(task.id, task));
+      this.setupEventListeners();
+    }
+  
+    private setupEventListeners(): void {
+      this.eventListeners.set('taskAdded', []);
+      this.eventListeners.set('taskUpdated', []);
+      this.eventListeners.set('taskDeleted', []);
+      this.eventListeners.set('tasksFiltered', []);
+    }
+  
+    private triggerEvent(eventName: string, data: any): void {
+      const listeners = this.eventListeners.get(eventName) || [];
+      listeners.forEach(listener => listener(data));
+    }
+  
+    addEventListener(eventName: string, callback: Function): void {
+      if (!this.eventListeners.has(eventName)) {
+        this.eventListeners.set(eventName, []);
+      }
+      this.eventListeners.get(eventName)?.push(callback);
+    }
+  
+    removeEventListener(eventName: string, callback: Function): void {
+      if (!this.eventListeners.has(eventName)) return;
+      
+      const listeners = this.eventListeners.get(eventName) || [];
+      const index = listeners.indexOf(callback);
+      if (index !== -1) {
+        listeners.splice(index, 1);
+      }
+    }
+  
+    getAllTasks(): Task[] {
+      return Array.from(this.tasks.values());
+    }
+  
+    getTaskById(id: string): Task | undefined {
+      return this.tasks.get(id);
+    }
+  
+    addTask(taskData: Omit<Task, 'id' | 'createdAt' | 'updatedAt'>): Task {
+      const now = new Date();
+      const task: Task = {
+        ...taskData,
+        id: generateId(),
+        createdAt: now,
+        updatedAt: now
+      };
+      
+      this.tasks.set(task.id, task);
+      this.triggerEvent('taskAdded', task);
+      return task;
+    }
+  
+    updateTask(id: string, updates: Partial<Omit<Task, 'id' | 'createdAt' | 'updatedAt'>>): Task | null {
+      const task = this.tasks.get(id);
+      if (!task) return null;
+  
+      const updatedTask: Task = {
+        ...task,
+        ...updates,
+        updatedAt: new Date()
+      };
+  
+      this.tasks.set(id, updatedTask);
+      this.triggerEvent('taskUpdated', updatedTask);
+      return updatedTask;
+    }
+  
+    deleteTask(id: string): boolean {
+      if (!this.tasks.has(id)) return false;
+      const task = this.tasks.get(id);
+      const deleted = this.tasks.delete(id);
+      if (deleted) {
+        this.triggerEvent('taskDeleted', task);
+      }
+      return deleted;
+    }
+  
+    filterTasks(filter: TaskFilter): Task[] {
+      let filteredTasks = this.getAllTasks();
+  
+      if (filter.title) {
+        filteredTasks = filteredTasks.filter(task => 
+          task.title.toLowerCase().includes(filter.title!.toLowerCase()));
+      }
+  
+      if (filter.completed !== undefined) {
+        filteredTasks = filteredTasks.filter(task => task.completed === filter.completed);
+      }
+  
+      if (filter.priority) {
+        filteredTasks = filteredTasks.filter(task => task.priority === filter.priority);
+      }
+  
+      if (filter.tags && filter.tags.length > 0) {
+        filteredTasks = filteredTasks.filter(task => 
+          filter.tags!.some(tag => task.tags.includes(tag)));
+      }
+  
+      if (filter.dueBefore) {
+        filteredTasks = filteredTasks.filter(task => task.dueDate <= filter.dueBefore!);
+      }
+  
+      if (filter.dueAfter) {
+        filteredTasks = filteredTasks.filter(task => task.dueDate >= filter.dueAfter!);
+      }
+  
+      this.triggerEvent('tasksFiltered', filteredTasks);
+      return filteredTasks;
+    }
+  
+    getOverdueTasks(): Task[] {
+      const now = new Date();
+      return this.getAllTasks().filter(task => !task.completed && task.dueDate < now);
+    }
+  
+    getTasksDueToday(): Task[] {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+  
+      return this.getAllTasks().filter(task => 
+        !task.completed && task.dueDate >= today && task.dueDate < tomorrow);
+    }
+  
+    getTaskStatistics(): TaskStatistics {
+      const tasks = this.getAllTasks();
+      const now = new Date();
+  
+      const statistics: TaskStatistics = {
+        total: tasks.length,
+        completed: tasks.filter(task => task.completed).length,
+        overdue: tasks.filter(task => !task.completed && task.dueDate < now).length,
+        priorityDistribution: {
+          low: tasks.filter(task => task.priority === 'low').length,
+          medium: tasks.filter(task => task.priority === 'medium').length,
+          high: tasks.filter(task => task.priority === 'high').length
+        },
+        tagDistribution: new Map<string, number>()
+      };
+  
+      // Calculate tag distribution
+      tasks.forEach(task => {
+        task.tags.forEach(tag => {
+          const count = statistics.tagDistribution.get(tag) || 0;
+          statistics.tagDistribution.set(tag, count + 1);
+        });
+      });
+  
+      return statistics;
+    }
+  
+    markTaskComplete(id: string): Task | null {
+      return this.updateTask(id, { completed: true });
+    }
+  
+    markTaskIncomplete(id: string): Task | null {
+      return this.updateTask(id, { completed: false });
+    }
+  
+    batchUpdateTasks(taskIds: string[], updates: Partial<Omit<Task, 'id' | 'createdAt' | 'updatedAt'>>): Task[] {
+      const updatedTasks: Task[] = [];
+      
+      taskIds.forEach(id => {
+        const updated = this.updateTask(id, updates);
+        if (updated) {
+          updatedTasks.push(updated);
+        }
+      });
+      
+      return updatedTasks;
+    }
+  
+    batchDeleteTasks(taskIds: string[]): number {
+      let deletedCount = 0;
+      
+      taskIds.forEach(id => {
+        if (this.deleteTask(id)) {
+          deletedCount++;
+        }
+      });
+      
+      return deletedCount;
+    }
+  
+    sortTasksBy(field: keyof Task, ascending: boolean = true): Task[] {
+      const tasks = this.getAllTasks();
+      
+      return tasks.sort((a, b) => {
+        if (a[field] < b[field]) return ascending ? -1 : 1;
+        if (a[field] > b[field]) return ascending ? 1 : -1;
+        return 0;
+      });
+    }
+  
+    getTasksGroupedByPriority(): Record<string, Task[]> {
+      const tasks = this.getAllTasks();
+      const grouped: Record<string, Task[]> = {
+        'high': [],
+        'medium': [],
+        'low': []
+      };
+      
+      tasks.forEach(task => {
+        grouped[task.priority].push(task);
+      });
+      
+      return grouped;
+    }
+  
+    getTasksGroupedByTags(): Record<string, Task[]> {
+      const tasks = this.getAllTasks();
+      const grouped: Record<string, Task[]> = {};
+      
+      tasks.forEach(task => {
+        task.tags.forEach(tag => {
+          if (!grouped[tag]) {
+            grouped[tag] = [];
+          }
+          grouped[tag].push(task);
+        });
+      });
+      
+      return grouped;
+    }
+  
+    exportTasksToJson(): string {
+      return JSON.stringify(Array.from(this.tasks.values()), (key, value) => {
+        if (key === 'dueDate' || key === 'createdAt' || key === 'updatedAt') {
+          return new Date(value).toISOString();
+        }
+        return value;
+      }, 2);
+    }
+  
+    importTasksFromJson(json: string): void {
+      try {
+        const tasks = JSON.parse(json, (key, value) => {
+          if (key === 'dueDate' || key === 'createdAt' || key === 'updatedAt') {
+            return new Date(value);
+          }
+          return value;
+        });
+        
+        if (!Array.isArray(tasks)) {
+          throw new Error('Invalid format: expected array of tasks');
+        }
+        
+        // Clear existing tasks
+        this.tasks.clear();
+        
+        // Add imported tasks
+        tasks.forEach(task => {
+          if (this.validateTask(task)) {
+            this.tasks.set(task.id, task);
+          } else {
+            console.warn(`Skipping invalid task: ${task.id}`);
+          }
+        });
+        
+      } catch (error) {
+        console.error('Failed to import tasks:', error);
+        throw error;
+      }
+    }
+  
+    private validateTask(task: any): task is Task {
+      return (
+        typeof task.id === 'string' &&
+        typeof task.title === 'string' &&
+        typeof task.description === 'string' &&
+        task.dueDate instanceof Date &&
+        typeof task.completed === 'boolean' &&
+        ['low', 'medium', 'high'].includes(task.priority) &&
+        Array.isArray(task.tags) &&
+        task.tags.every((tag: any) => typeof tag === 'string') &&
+        task.createdAt instanceof Date &&
+        task.updatedAt instanceof Date
+      );
+    }
+  }
+  
 
     // New Performance Monitoring System
     interface PerformanceMetrics {
