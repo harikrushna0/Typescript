@@ -625,6 +625,193 @@ class AnalyticsEngine {
     }
 }
 
+class EnhancedAnalyticsEngine {
+    private readonly config: AnalyticsConfig;
+    private readonly processors: Map<string, StreamProcessor>;
+    private readonly cache: MetricsCache;
+    private readonly alertManager: AlertManager;
+    private readonly storageManager: StorageManager;
+    private readonly statsCollector: StatsCollector;
+
+    constructor(config: AnalyticsConfig) {
+        this.validateConfig(config);
+        this.config = config;
+        this.processors = new Map();
+        this.cache = new MetricsCache(config.caching);
+        this.alertManager = new AlertManager(config.alerting);
+        this.storageManager = new StorageManager(config.storage);
+        this.statsCollector = new StatsCollector();
+        this.initialize();
+    }
+
+    private async initialize(): Promise<void> {
+        try {
+            await this.setupProcessors();
+            await this.initializeCache();
+            await this.setupAlertSystem();
+            await this.initializeStorage();
+            await this.startMetricsCollection();
+        } catch (error) {
+            throw new EngineInitializationError('Failed to initialize analytics engine', error);
+        }
+    }
+
+    private async setupProcessors(): Promise<void> {
+        const processorConfigs = [
+            {
+                type: 'realtime',
+                config: {
+                    batchSize: 100,
+                    processingInterval: 1000,
+                    maxRetries: 3,
+                    bufferSize: 10000
+                }
+            },
+            {
+                type: 'batch',
+                config: {
+                    batchSize: 1000,
+                    processingInterval: 5000,
+                    compressionEnabled: true,
+                    retentionPeriod: 86400000
+                }
+            },
+            {
+                type: 'aggregation',
+                config: {
+                    windowSize: 60000,
+                    aggregationLevels: ['1m', '5m', '1h', '1d'],
+                    persistenceEnabled: true
+                }
+            }
+        ];
+
+        for (const config of processorConfigs) {
+            const processor = await this.createProcessor(config);
+            this.processors.set(config.type, processor);
+            await this.setupProcessorHandlers(processor);
+        }
+    }
+
+    public async processMetrics(metrics: Metric[]): Promise<ProcessingResult> {
+        const startTime = Date.now();
+        const results: ProcessingResult = {
+            processed: 0,
+            failed: 0,
+            skipped: 0,
+            duration: 0,
+            errors: []
+        };
+
+        try {
+            const validMetrics = await this.validateMetrics(metrics);
+            const enrichedMetrics = await this.enrichMetrics(validMetrics);
+            const batches = this.createMetricBatches(enrichedMetrics);
+
+            await Promise.all(
+                batches.map(async batch => {
+                    try {
+                        const batchResult = await this.processBatch(batch);
+                        this.updateProcessingResults(results, batchResult);
+                    } catch (error) {
+                        await this.handleBatchError(error, batch, results);
+                    }
+                })
+            );
+
+            await this.updateCache(enrichedMetrics);
+            await this.checkThresholds(enrichedMetrics);
+            await this.persistResults(results);
+
+        } catch (error) {
+            await this.handleProcessingError(error, results);
+        } finally {
+            results.duration = Date.now() - startTime;
+            await this.recordMetrics(results);
+        }
+
+        return results;
+    }
+
+    private async processBatch(batch: Metric[]): Promise<BatchResult> {
+        const processor = this.selectProcessor(batch);
+        const processedBatch = await processor.process(batch);
+        
+        await this.validateProcessedBatch(processedBatch);
+        await this.enrichProcessedBatch(processedBatch);
+        await this.aggregateProcessedBatch(processedBatch);
+        
+        return {
+            processed: processedBatch.length,
+            timestamp: new Date(),
+            metadata: this.generateBatchMetadata(processedBatch)
+        };
+    }
+
+    private selectProcessor(batch: Metric[]): StreamProcessor {
+        const batchCharacteristics = this.analyzeBatch(batch);
+        
+        if (batchCharacteristics.requiresRealTime) {
+            return this.processors.get('realtime')!;
+        } else if (batchCharacteristics.requiresAggregation) {
+            return this.processors.get('aggregation')!;
+        } else {
+            return this.processors.get('batch')!;
+        }
+    }
+
+    private analyzeBatch(batch: Metric[]): BatchCharacteristics {
+        const analysis = {
+            totalMetrics: batch.length,
+            uniqueTypes: new Set(batch.map(m => m.type)).size,
+            timeRange: this.calculateTimeRange(batch),
+            dataDensity: this.calculateDataDensity(batch),
+            requiresRealTime: false,
+            requiresAggregation: false
+        };
+
+        // Determine processing requirements
+        analysis.requiresRealTime = 
+            analysis.timeRange.span < 60000 && 
+            analysis.dataDensity > 0.8;
+
+        analysis.requiresAggregation = 
+            analysis.timeRange.span > 3600000 || 
+            analysis.uniqueTypes > 5;
+
+        return analysis;
+    }
+
+    private async enrichProcessedBatch(batch: Metric[]): Promise<void> {
+        const enrichmentTasks = batch.map(async metric => {
+            try {
+                // Add metadata
+                metric.metadata = {
+                    ...metric.metadata,
+                    processingTimestamp: new Date(),
+                    correlationId: this.generateCorrelationId(),
+                    processingNode: this.config.nodeId
+                };
+
+                // Add statistical analysis
+                metric.statistics = await this.calculateStatistics(metric);
+
+                // Add trend analysis
+                metric.trends = await this.analyzeTrends(metric);
+
+                // Add anomaly scores
+                metric.anomalyScore = await this.detectAnomalies(metric);
+
+                return metric;
+            } catch (error) {
+                throw new EnrichmentError('Failed to enrich metric', { metric, error });
+            }
+        });
+
+        await Promise.all(enrichmentTasks);
+    }
+}
+
 class DataSource {
     private config: DataSourceConfig;
     private isConnected: boolean = false;

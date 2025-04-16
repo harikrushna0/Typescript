@@ -7,6 +7,9 @@ interface SchedulerConfig {
     defaultRetryAttempts: number;
     timeoutSeconds: number;
     timezone: string;
+    maxRetries?: number;
+    retryDelay?: number;
+    healthCheckInterval?: number;
 }
 
 interface JobDefinition {
@@ -19,6 +22,12 @@ interface JobDefinition {
     retryAttempts?: number;
     priority: number;
     metadata?: Record<string, any>;
+    status?: string;
+    lastRun?: Date | null;
+    nextRun?: Date | null;
+    retryCount?: number;
+    chainedJobs?: string[];
+    failureHandlerJob?: string;
 }
 
 class SchedulerService extends EventEmitter {
@@ -28,24 +37,158 @@ class SchedulerService extends EventEmitter {
     private logger: Logger;
     private metrics: MetricsCollector;
     private config: SchedulerConfig;
+    private healthCheck: HealthCheckService;
+    private retryPolicy: RetryPolicyService;
 
     constructor(config: SchedulerConfig) {
         super();
         this.jobs = new Map();
         this.runningJobs = new Map();
         this.handlers = new Map();
-        this.config = config;
+        this.config = {
+            ...config,
+            maxRetries: config.maxRetries || 3,
+            retryDelay: config.retryDelay || 1000,
+            healthCheckInterval: config.healthCheckInterval || 30000
+        };
         this.initializeScheduler();
     }
 
     private async initializeScheduler(): Promise<void> {
         this.logger = new Logger('SchedulerService');
         this.metrics = new MetricsCollector('scheduler');
+        this.healthCheck = new HealthCheckService(this.config);
+        this.retryPolicy = new RetryPolicyService(this.config);
         
         await this.loadJobDefinitions();
         await this.registerDefaultHandlers();
         await this.startMetricsCollection();
+        await this.initializeHealthChecks();
         this.setupEventListeners();
+    }
+
+    private async loadJobDefinitions(): Promise<void> {
+        try {
+            const storedJobs = await this.db.jobs.findAll();
+            for (const job of storedJobs) {
+                this.jobs.set(job.id, {
+                    ...job,
+                    status: 'PENDING',
+                    lastRun: null,
+                    nextRun: this.calculateNextRun(job)
+                });
+            }
+        } catch (error) {
+            this.logger.error('Failed to load job definitions', { error });
+            throw error;
+        }
+    }
+
+    private setupEventListeners(): void {
+        this.on('jobCompleted', ({ jobId, result }) => {
+            this.handleJobCompletion(jobId, result);
+        });
+
+        this.on('jobFailed', ({ jobId, error }) => {
+            this.handleJobFailure(jobId, error);
+        });
+
+        this.on('healthCheck', (status) => {
+            this.handleHealthCheckStatus(status);
+        });
+    }
+
+    private async handleJobCompletion(jobId: string, result: any): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        try {
+            await this.updateJobStatus(jobId, 'COMPLETED');
+            await this.metrics.recordSuccess(jobId);
+            await this.calculateAndUpdateNextRun(job);
+            await this.notifySubscribers(job, result);
+            
+            if (job.chainedJobs?.length) {
+                await this.triggerChainedJobs(job.chainedJobs);
+            }
+        } catch (error) {
+            this.logger.error('Error handling job completion', { jobId, error });
+        }
+    }
+
+    private async handleJobFailure(jobId: string, error: Error): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        try {
+            const retryDecision = await this.retryPolicy.shouldRetry(job, error);
+            
+            if (retryDecision.shouldRetry) {
+                await this.scheduleRetry(job, retryDecision.delay);
+            } else {
+                await this.handleFinalFailure(job, error);
+            }
+            
+            await this.metrics.recordFailure(jobId, error);
+            await this.notifyAdmins(job, error);
+        } catch (secondaryError) {
+            this.logger.error('Error handling job failure', { 
+                jobId, 
+                originalError: error, 
+                handlingError: secondaryError 
+            });
+        }
+    }
+
+    private async scheduleRetry(job: JobDefinition, delay: number): Promise<void> {
+        const retryJob = {
+            ...job,
+            retryCount: (job.retryCount || 0) + 1,
+            nextRun: new Date(Date.now() + delay),
+            status: 'PENDING_RETRY'
+        };
+
+        await this.updateJob(job.id, retryJob);
+        this.emit('jobScheduledForRetry', { jobId: job.id, retryCount: retryJob.retryCount });
+    }
+
+    private async handleFinalFailure(job: JobDefinition, error: Error): Promise<void> {
+        await this.updateJobStatus(job.id, 'FAILED');
+        await this.metrics.recordFinalFailure(job.id);
+        
+        if (job.failureHandlerJob) {
+            await this.triggerFailureHandler(job, error);
+        }
+
+        this.emit('jobFinalFailure', { 
+            jobId: job.id, 
+            error, 
+            attempts: job.retryCount || 1 
+        });
+    }
+
+    private async calculateAndUpdateNextRun(job: JobDefinition): Promise<void> {
+        const nextRun = this.calculateNextRun(job);
+        if (nextRun) {
+            await this.updateJob(job.id, {
+                ...job,
+                nextRun,
+                lastRun: new Date()
+            });
+        }
+    }
+
+    private calculateNextRun(job: JobDefinition): Date | null {
+        switch (job.type) {
+            case 'cron':
+                return this.calculateNextCronRun(job.schedule);
+            case 'interval':
+                return new Date(Date.now() + parseInt(job.schedule));
+            case 'once':
+                return null;
+            default:
+                throw new Error(`Unsupported job type: ${job.type}`);
+        }
     }
 
     public async scheduleJob(definition: JobDefinition): Promise<string> {

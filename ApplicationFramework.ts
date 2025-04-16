@@ -1234,519 +1234,182 @@ class PromotionManager {
     // Core Application Class
     export class Application {
         private readonly config: IApplicationConfig;
-        private readonly container: DependencyContainer;
-        private readonly logger: Logger;
         private readonly modules: Map<string, Module>;
         private readonly services: Map<string, Service>;
-        private readonly router: Router;
-        private readonly database: Database;
-        private readonly cache: Cache;
-        private readonly security: Security;
-        private readonly telemetry: TelemetrySystem; // Added telemetry system
-        private isInitialized: boolean = false;
-        private errorHandlers: Map<string, ErrorHandler>;
-        private performanceMonitor: PerformanceMonitor;
-        private healthChecker: HealthChecker;
-        private errorManager: ErrorManager;
-        private metricsCollector: MetricsCollector;
-        private healthMonitor: HealthMonitor;
+        private readonly eventBus: EventBus;
+        private readonly stateManager: StateManager;
+        private readonly configManager: ConfigManager;
+        private readonly metricRegistry: MetricRegistry;
+        private readonly loadBalancer: LoadBalancer;
 
         constructor(config: IApplicationConfig) {
-            this.validateConfig(config);
-            this.config = config;
-            this.container = new DependencyContainer();
-            this.logger = new Logger(config.logging);
+            this.validateConfiguration(config);
+            this.config = this.enrichConfiguration(config);
             this.modules = new Map();
             this.services = new Map();
-            this.router = new Router();
-            this.database = new Database(config.database);
-            this.cache = new Cache(config.caching);
-            this.security = new Security(config.security);
-            this.telemetry = new TelemetrySystem(config.telemetry); // Initialize telemetry system
-            this.initializeErrorHandling();
-            this.setupPerformanceMonitoring();
-            this.initializeHealthChecks();
-            this.initializeComponents(config);
-            this.setupErrorHandling();
-            this.setupMetricsCollection();
-            this.setupHealthMonitoring();
+            this.eventBus = new EventBus();
+            this.stateManager = new StateManager();
+            this.configManager = new ConfigManager();
+            this.metricRegistry = new MetricRegistry();
+            this.loadBalancer = new LoadBalancer(config.loadBalancing);
+            this.initialize();
         }
 
-        private validateConfig(config: IApplicationConfig): void {
-            if (!config.name || !config.version) {
-                throw new Error('Application name and version are required');
-            }
-            // Additional validation logic
-        }
-
-        public async initialize(): Promise<void> {
-            if (this.isInitialized) {
-                throw new Error('Application is already initialized');
-            }
-
+        private async initialize(): Promise<void> {
             try {
-                this.logger.info('Initializing application...');
-
-                await this.initializeContainer();
-                await this.initializeDatabase();
-                await this.initializeCache();
-                await this.initializeSecurity();
+                await this.initializeCore();
                 await this.initializeModules();
                 await this.initializeServices();
-                await this.initializeRouter();
-
-                this.isInitialized = true;
-                this.logger.info('Application initialized successfully');
+                await this.setupEventHandlers();
+                await this.startMetricsCollection();
+                await this.initializeLoadBalancer();
             } catch (error) {
-                this.logger.error('Failed to initialize application', error);
-                throw error;
+                await this.handleInitializationError(error);
+                throw new ApplicationInitializationError('Failed to initialize application', error);
             }
         }
 
-        private async initializeContainer(): Promise<void> {
-            this.container.register('logger', this.logger);
-            this.container.register('database', this.database);
-            this.container.register('cache', this.cache);
-            this.container.register('security', this.security);
-            this.container.register('router', this.router);
-            this.container.register('telemetry', this.telemetry); // Register telemetry system
-        }
+        private async initializeCore(): Promise<void> {
+            const coreComponents = [
+                this.initializeEventBus(),
+                this.initializeStateManager(),
+                this.initializeConfigManager(),
+                this.initializeMetricRegistry(),
+                this.initializeSecurityManager(),
+                this.initializeCacheManager(),
+                this.initializeDatabaseConnection(),
+                this.initializeApiGateway()
+            ];
 
-        private async initializeDatabase(): Promise<void> {
-            await this.database.connect();
-        }
-
-        private async initializeCache(): Promise<void> {
-            await this.cache.connect();
-        }
-
-        private async initializeSecurity(): Promise<void> {
-            await this.security.initialize();
+            try {
+                await Promise.all(coreComponents);
+            } catch (error) {
+                throw new CoreInitializationError('Failed to initialize core components', error);
+            }
         }
 
         private async initializeModules(): Promise<void> {
-            const initOrder = this.calculateModuleDependencies();
+            const moduleInitOrder = this.calculateModuleDependencies();
             
-            for (const moduleName of initOrder) {
-                const moduleConfig = this.config.modules.find(m => m.name === moduleName);
-                if (moduleConfig && moduleConfig.enabled) {
-                    try {
-                        this.logger.info(`Initializing module: ${moduleName}`);
-                        const module = new Module(moduleConfig, this.container);
-                        await module.initialize();
-                        this.modules.set(moduleName, module);
-                        this.telemetry.trackEvent('module_initialized', { 
-                            moduleName,
-                            success: true 
-                        });
-                    } catch (error) {
-                        this.telemetry.trackException(error as Error, { moduleName });
-                        throw new Error(`Failed to initialize module ${moduleName}: ${error.message}`);
-                    }
+            for (const moduleName of moduleInitOrder) {
+                try {
+                    await this.initializeModule(moduleName);
+                } catch (error) {
+                    await this.handleModuleInitializationError(moduleName, error);
+                    throw new ModuleInitializationError(
+                        `Failed to initialize module: ${moduleName}`,
+                        error
+                    );
                 }
             }
         }
 
-        private calculateModuleDependencies(): string[] {
-            const visited = new Set<string>();
-            const visiting = new Set<string>();
-            const order: string[] = [];
+        private async initializeModule(moduleName: string): Promise<void> {
+            const moduleConfig = this.config.modules.find(m => m.name === moduleName);
+            if (!moduleConfig || !moduleConfig.enabled) return;
 
-            const visit = (moduleName: string) => {
-                if (visiting.has(moduleName)) {
-                    throw new Error(`Circular dependency detected for module: ${moduleName}`);
-                }
-                if (visited.has(moduleName)) return;
+            const module = await this.createModule(moduleConfig);
+            await this.validateModuleHealth(module);
+            await this.registerModuleEventHandlers(module);
+            await this.initializeModuleState(module);
+            await this.startModuleMetrics(module);
 
-                visiting.add(moduleName);
-                const module = this.config.modules.find(m => m.name === moduleName);
-                
-                if (module?.dependencies) {
-                    for (const dep of module.dependencies) {
-                        visit(dep);
-                    }
-                }
-
-                visiting.delete(moduleName);
-                visited.add(moduleName);
-                order.push(moduleName);
-            };
-
-            for (const module of this.config.modules) {
-                visit(module.name);
-            }
-
-            return order;
+            this.modules.set(moduleName, module);
         }
 
-        public async start(): Promise<void> {
-            if (!this.isInitialized) {
-                await this.initialize();
-            }
-
-            try {
-                this.logger.info('Starting application...');
-
-                // Start all modules
-                for (const module of this.modules.values()) {
-                    await module.start();
-                }
-
-                // Start all services
-                for (const service of this.services.values()) {
-                    await service.start();
-                }
-
-                // Start the router
-                await this.router.start();
-
-                this.logger.info(`Application ${this.config.name} v${this.config.version} started successfully`);
-            } catch (error) {
-                this.logger.error('Failed to start application', error);
-                throw error;
-            }
-        }
-
-        public async stop(): Promise<void> {
-            try {
-                this.logger.info('Stopping application...');
-
-                // Stop all modules in reverse order
-                for (const module of Array.from(this.modules.values()).reverse()) {
-                    await module.stop();
-                }
-
-                // Stop all services in reverse order
-                for (const service of Array.from(this.services.values()).reverse()) {
-                    await service.stop();
-                }
-
-                // Stop the router
-                await this.router.stop();
-
-                // Close database connection
-                await this.database.disconnect();
-
-                // Close cache connection
-                await this.cache.disconnect();
-
-                // Stop telemetry system
-                await this.telemetry.stop();
-
-                this.logger.info('Application stopped successfully');
-            } catch (error) {
-                this.logger.error('Failed to stop application', error);
-                throw error;
-            }
-        }
-
-        private initializeErrorHandling(): void {
-            this.errorHandlers = new Map();
-            this.setupDatabaseErrorHandler();
-            this.setupNetworkErrorHandler();
-            this.setupSecurityErrorHandler();
-        }
-
-        private setupDatabaseErrorHandler(): void {
-            this.errorHandlers.set('database', new DatabaseErrorHandler({
-                retryAttempts: 3,
-                backoffStrategy: 'exponential',
-                maxTimeout: 5000,
-                onFinalFailure: this.handleDatabaseFailure.bind(this)
-            }));
-        }
-
-        private setupNetworkErrorHandler(): void {
-            this.errorHandlers.set('network', new NetworkErrorHandler({
-                retryAttempts: 5,
-                timeout: 3000,
-                circuitBreaker: {
-                    threshold: 0.5,
-                    resetTimeout: 60000
-                }
-            }));
-        }
-
-        private setupSecurityErrorHandler(): void {
-            this.errorHandlers.set('security', new SecurityErrorHandler({
-                logLevel: 'critical',
-                notifyAdmin: true,
-                blockThreshold: 3
-            }));
-        }
-
-        private handleDatabaseFailure(error: DatabaseError): void {
-            this.logger.critical('Database failure', {
-                error: error.message,
-                context: error.context,
-                timestamp: new Date()
-            });
-
-            this.notifyAdministrators({
-                type: 'DatabaseFailure',
-                error: error,
-                time: new Date(),
-                severity: 'Critical'
-            });
-
-            this.initiateFailover('database');
-        }
-
-        private setupPerformanceMonitoring(): void {
-            this.performanceMonitor = new PerformanceMonitor({
-                sampleInterval: 1000,
-                metricsRetention: 24 * 60 * 60 * 1000, // 24 hours
-                alertThresholds: {
-                    cpu: 80,
-                    memory: 90,
-                    diskSpace: 85,
-                    responseTime: 1000
-                }
-            });
-
-            this.performanceMonitor.onAlert(this.handlePerformanceAlert.bind(this));
-            this.performanceMonitor.start();
-        }
-
-        private handlePerformanceAlert(alert: PerformanceAlert): void {
-            this.logger.warn('Performance threshold exceeded', {
-                metric: alert.metric,
-                value: alert.value,
-                threshold: alert.threshold,
-                timestamp: alert.timestamp
-            });
-
-            switch (alert.severity) {
-                case 'critical':
-                    this.initiateScaling();
-                    this.notifyAdministrators(alert);
-                    break;
-                case 'warning':
-                    this.optimizeResources();
-                    break;
-                case 'info':
-                    this.logMetric(alert);
-                    break;
-            }
-        }
-
-        private initializeHealthChecks(): void {
-            this.healthChecker = new HealthChecker({
-                interval: 30000,
-                timeout: 5000,
-                checks: [
-                    {
-                        name: 'database',
-                        check: this.checkDatabaseHealth.bind(this)
-                    },
-                    {
-                        name: 'cache',
-                        check: this.checkCacheHealth.bind(this)
-                    },
-                    {
-                        name: 'api',
-                        check: this.checkApiHealth.bind(this)
-                    }
-                ]
-            });
-
-            this.healthChecker.onUnhealthy(this.handleUnhealthyService.bind(this));
-            this.healthChecker.start();
-        }
-
-        private async checkDatabaseHealth(): Promise<HealthStatus> {
-            try {
-                const start = Date.now();
-                await this.database.ping();
-                const latency = Date.now() - start;
-
-                return {
-                    status: 'healthy',
-                    latency,
-                    timestamp: new Date()
-                };
-            } catch (error) {
-                return {
-                    status: 'unhealthy',
-                    error: error.message,
-                    timestamp: new Date()
-                };
-            }
-        }
-
-        private handleUnhealthyService(service: string, status: HealthStatus): void {
-            this.logger.error(`Service unhealthy: ${service}`, {
-                status,
-                timestamp: new Date()
-            });
-
-            switch (service) {
-                case 'database':
-                    this.handleDatabaseUnhealthy(status);
-                    break;
-                case 'cache':
-                    this.handleCacheUnhealthy(status);
-                    break;
-                case 'api':
-                    this.handleApiUnhealthy(status);
-                    break;
-            }
-        }
-
-        private async optimizeResources(): Promise<void> {
-            await this.cache.prune();
-            await this.database.optimize();
-            await this.cleanupSessions();
-        }
-
-        private async cleanupSessions(): Promise<void> {
-            const expiredSessions = await this.sessionManager.getExpiredSessions();
-            for (const session of expiredSessions) {
-                await this.sessionManager.terminate(session.id);
-            }
-        }
-
-        private initiateFailover(service: string): void {
-            this.logger.info(`Initiating failover for ${service}`);
-            switch (service) {
-                case 'database':
-                    this.switchToReplicaDatabase();
-                    break;
-                case 'cache':
-                    this.switchToBackupCache();
-                    break;
-                case 'api':
-                    this.redirectToBackupApi();
-                    break;
-            }
-        }
-
-        private initializeComponents(config: IApplicationConfig): void {
-            this.errorManager = new ErrorManager({
-                maxRetries: config.error.maxRetries,
-                backoffStrategy: config.error.backoffStrategy,
-                notifyOnError: config.error.notifyOnError
-            });
-
-            this.metricsCollector = new MetricsCollector({
-                interval: config.metrics.interval,
-                batchSize: config.metrics.batchSize,
-                flushInterval: config.metrics.flushInterval
-            });
-
-            this.healthMonitor = new HealthMonitor({
-                checkInterval: config.health.checkInterval,
-                timeout: config.health.timeout,
-                thresholds: config.health.thresholds
-            });
-        }
-
-        private setupMetricsCollection(): void {
-            this.metricsCollector.onThresholdExceeded((metric, value) => {
-                this.handleMetricThresholdExceeded(metric, value);
-            });
-
-            this.metricsCollector.onBatchComplete(async (batch) => {
-                await this.processBatchMetrics(batch);
-            });
-
-            this.startMetricsCollection();
-        }
-
-        private async processBatchMetrics(batch: MetricsBatch): Promise<void> {
-            try {
-                await this.storeBatchMetrics(batch);
-                await this.analyzeMetrics(batch);
-                await this.updateDashboard(batch);
-            } catch (error) {
-                await this.handleMetricsError(error, batch);
-            }
-        }
-
-        private setupHealthMonitoring(): void {
-            this.healthMonitor.onUnhealthy((component, status) => {
-                this.handleUnhealthyComponent(component, status);
-            });
-
-            this.healthMonitor.onRecovered((component, status) => {
-                this.handleComponentRecovery(component, status);
-            });
-
-            this.startHealthChecks();
-        }
-
-        private async handleUnhealthyComponent(
-            component: string, 
-            status: HealthStatus
+        private async handleModuleInitializationError(
+            moduleName: string,
+            error: Error
         ): Promise<void> {
-            this.logger.warn(`Component ${component} is unhealthy`, {
-                status,
-                timestamp: new Date()
-            });
-
+            await this.metricRegistry.incrementCounter('module_initialization_failure');
             await this.notifyAdministrators({
-                type: 'ComponentUnhealthy',
-                component,
-                status,
+                type: 'ModuleInitializationFailure',
+                moduleName,
+                error: error.message,
                 timestamp: new Date()
             });
 
-            await this.initiateComponentRecovery(component, status);
-        }
-
-        private async initiateComponentRecovery(
-            component: string,
-            status: HealthStatus
-        ): Promise<void> {
-            const recovery = new ComponentRecovery(component);
-            await recovery.start();
-
-            recovery.onProgress((progress) => {
-                this.updateRecoveryStatus(component, progress);
-            });
-
-            recovery.onComplete((result) => {
-                this.handleRecoveryComplete(component, result);
-            });
-        }
-
-        private async handleRecoveryComplete(
-            component: string,
-            result: RecoveryResult
-        ): Promise<void> {
-            if (result.success) {
-                await this.handleSuccessfulRecovery(component, result);
-            } else {
-                await this.handleFailedRecovery(component, result);
+            if (this.isRecoverableError(error)) {
+                await this.attemptModuleRecovery(moduleName);
             }
         }
 
-        private async handleSuccessfulRecovery(
-            component: string,
-            result: RecoveryResult
-        ): Promise<void> {
-            this.logger.info(`Component ${component} recovered successfully`, {
-                duration: result.duration,
-                steps: result.steps
-            });
-
-            await this.metricsCollector.recordRecovery({
-                component,
-                duration: result.duration,
-                timestamp: new Date()
-            });
+        private async initializeServices(): Promise<void> {
+            const serviceGroups = this.groupServicesByDependencies();
+            
+            for (const group of serviceGroups) {
+                await Promise.all(
+                    group.map(serviceName => this.initializeService(serviceName))
+                );
+            }
         }
 
-        private async handleFailedRecovery(
-            component: string,
-            result: RecoveryResult
-        ): Promise<void> {
-            this.logger.error(`Component ${component} recovery failed`, {
-                error: result.error,
-                attempts: result.attempts
+        private async initializeService(serviceName: string): Promise<void> {
+            const serviceConfig = this.config.services.find(s => s.name === serviceName);
+            if (!serviceConfig) return;
+
+            try {
+                const service = await this.createService(serviceConfig);
+                await this.validateServiceHealth(service);
+                await this.registerServiceEventHandlers(service);
+                await this.initializeServiceState(service);
+                await this.startServiceMetrics(service);
+
+                this.services.set(serviceName, service);
+            } catch (error) {
+                await this.handleServiceInitializationError(serviceName, error);
+            }
+        }
+
+        private groupServicesByDependencies(): string[][] {
+            const serviceNodes = new Map<string, Set<string>>();
+            const groups: string[][] = [];
+
+            // Build dependency graph
+            this.config.services.forEach(service => {
+                serviceNodes.set(
+                    service.name,
+                    new Set(service.dependencies || [])
+                );
             });
 
-            await this.escalateFailure(component, result);
+            // Topological sort
+            while (serviceNodes.size > 0) {
+                const group = Array.from(serviceNodes.entries())
+                    .filter(([_, deps]) => deps.size === 0)
+                    .map(([name]) => name);
+
+                if (group.length === 0) {
+                    throw new Error('Circular dependency detected in services');
+                }
+
+                groups.push(group);
+
+                // Remove satisfied dependencies
+                group.forEach(serviceName => {
+                    serviceNodes.delete(serviceName);
+                    serviceNodes.forEach(deps => deps.delete(serviceName));
+                });
+            }
+
+            return groups;
+        }
+
+        private async handleServiceInitializationError(
+            serviceName: string,
+            error: Error
+        ): Promise<void> {
+            await this.metricRegistry.incrementCounter('service_initialization_failure');
+            await this.notifyAdministrators({
+                type: 'ServiceInitializationFailure',
+                serviceName,
+                error: error.message,
+                timestamp: new Date()
+            });
+
+            if (this.isRecoverableError(error)) {
+                await this.attemptServiceRecovery(serviceName);
+            }
         }
     }
 }
