@@ -373,6 +373,309 @@ interface Item {     for (const event of events) {  }
   }      }
   
   console.log("Area of rectangle:", calculateRectangleArea(5, 10));c({
+  // Inventory Management System (300 lines)
+
+// 1. Define interfaces
+interface Product {
+    id: string;
+    name: string;
+    price: number;
+    category: string;
+  }
+  
+  interface InventoryItem {
+    product: Product;
+    quantity: number;
+  }
+  
+  interface Order {
+    id: string;
+    products: { productId: string; quantity: number }[];
+    status: 'pending' | 'processing' | 'completed' | 'cancelled';
+    createdAt: Date;
+  }
+  
+  // 2. Create decorators
+  function logOperation(target: any, key: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    descriptor.value = function (...args: any[]) {
+      console.log(`Executing ${key} with args: ${JSON.stringify(args)}`);
+      const result = originalMethod.apply(this, args);
+      console.log(`Completed ${key} with result: ${JSON.stringify(result)}`);
+      return result;
+    };
+    return descriptor;
+  }
+  
+  function validateProduct(target: any, key: string, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    descriptor.value = function (product: Product) {
+      if (!product.id || !product.name || product.price <= 0) {
+        throw new Error('Invalid product data');
+      }
+      return originalMethod.apply(this, [product]);
+    };
+    return descriptor;
+  }
+  
+  // 3. Create generic repository
+  class Repository<T extends { id: string }> {
+    private items: T[] = [];
+  
+    add(item: T): void {
+      this.items.push(item);
+    }
+  
+    getById(id: string): T | undefined {
+      return this.items.find(item => item.id === id);
+    }
+  
+    getAll(): T[] {
+      return [...this.items];
+    }
+  
+    update(id: string, updateFn: (item: T) => T): boolean {
+      const index = this.items.findIndex(item => item.id === id);
+      if (index === -1) return false;
+      this.items[index] = updateFn(this.items[index]);
+      return true;
+    }
+  
+    delete(id: string): boolean {
+      const initialLength = this.items.length;
+      this.items = this.items.filter(item => item.id !== id);
+      return this.items.length !== initialLength;
+    }
+  }
+  
+  // 4. Create inventory service
+  class InventoryService {
+    private productRepository = new Repository<Product>();
+    private inventory: InventoryItem[] = [];
+    private orderRepository = new Repository<Order>();
+  
+    @logOperation
+    @validateProduct
+    addProduct(product: Product): void {
+      this.productRepository.add(product);
+    }
+  
+    @logOperation
+    addStock(productId: string, quantity: number): boolean {
+      const product = this.productRepository.getById(productId);
+      if (!product) return false;
+  
+      const existingItem = this.inventory.find(item => item.product.id === productId);
+      if (existingItem) {
+        existingItem.quantity += quantity;
+      } else {
+        this.inventory.push({ product, quantity });
+      }
+      return true;
+    }
+  
+    @logOperation
+    removeStock(productId: string, quantity: number): boolean {
+      const existingItem = this.inventory.find(item => item.product.id === productId);
+      if (!existingItem || existingItem.quantity < quantity) return false;
+  
+      existingItem.quantity -= quantity;
+      if (existingItem.quantity === 0) {
+        this.inventory = this.inventory.filter(item => item.product.id !== productId);
+      }
+      return true;
+    }
+  
+    @logOperation
+    createOrder(productQuantities: { productId: string; quantity: number }[]): Order | null {
+      // Check stock availability
+      for (const pq of productQuantities) {
+        const item = this.inventory.find(i => i.product.id === pq.productId);
+        if (!item || item.quantity < pq.quantity) return null;
+      }
+  
+      // Create order
+      const order: Order = {
+        id: `ord-${Date.now()}`,
+        products: productQuantities,
+        status: 'pending',
+        createdAt: new Date()
+      };
+  
+      this.orderRepository.add(order);
+      return order;
+    }
+  
+    @logOperation
+    async processOrder(orderId: string): Promise<boolean> {
+      const order = this.orderRepository.getById(orderId);
+      if (!order || order.status !== 'pending') return false;
+  
+      // Update order status to processing
+      this.orderRepository.update(orderId, (o) => ({ ...o, status: 'processing' }));
+  
+      // Simulate async processing (e.g., payment, shipping)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+  
+      // Deduct stock
+      for (const pq of order.products) {
+        this.removeStock(pq.productId, pq.quantity);
+      }
+  
+      // Update order status to completed
+      this.orderRepository.update(orderId, (o) => ({ ...o, status: 'completed' }));
+      return true;
+    }
+  
+    getInventory(): InventoryItem[] {
+      return [...this.inventory];
+    }
+  
+    getProducts(): Product[] {
+      return this.productRepository.getAll();
+    }
+  
+    getOrders(): Order[] {
+      return this.orderRepository.getAll();
+    }
+  }
+  
+  // 5. Utility functions
+  function generateId(prefix: string): string {
+    return `${prefix}-${Math.random().toString(36).substr(2, 9)}`;
+  }
+  
+  function createProduct(name: string, price: number, category: string): Product {
+    return {
+      id: generateId('prod'),
+      name,
+      price,
+      category
+    };
+  }
+  
+  // 6. Example usage
+  async function demoInventorySystem() {
+    const inventoryService = new InventoryService();
+  
+    // Add some products
+    const laptop = createProduct('Laptop', 999.99, 'Electronics');
+    const phone = createProduct('Smartphone', 699.99, 'Electronics');
+    const book = createProduct('TypeScript Handbook', 29.99, 'Books');
+  
+    inventoryService.addProduct(laptop);
+    inventoryService.addProduct(phone);
+    inventoryService.addProduct(book);
+  
+    // Add stock
+    inventoryService.addStock(laptop.id, 10);
+    inventoryService.addStock(phone.id, 15);
+    inventoryService.addStock(book.id, 50);
+  
+    // Create an order
+    const order = inventoryService.createOrder([
+      { productId: laptop.id, quantity: 2 },
+      { productId: book.id, quantity: 3 }
+    ]);
+  
+    if (order) {
+      console.log(`Order ${order.id} created`);
+      
+      // Process the order
+      const success = await inventoryService.processOrder(order.id);
+      console.log(`Order processing ${success ? 'succeeded' : 'failed'}`);
+    }
+  
+    // Display current inventory
+    console.log('Current Inventory:');
+    inventoryService.getInventory().forEach(item => {
+      console.log(`${item.product.name}: ${item.quantity} in stock`);
+    });
+  
+    // Display all orders
+    console.log('All Orders:');
+    inventoryService.getOrders().forEach(order => {
+      console.log(`Order ${order.id} - Status: ${order.status}`);
+    });
+  }
+  
+  // Run the demo
+  demoInventorySystem().catch(console.error);
+  
+  // 7. Additional utility class for demonstration
+  class Analytics<T extends { createdAt: Date }> {
+    constructor(private data: T[]) {}
+  
+    filterByDateRange(start: Date, end: Date): T[] {
+      return this.data.filter(item => 
+        item.createdAt >= start && item.createdAt <= end
+      );
+    }
+  
+    countBy(predicate: (item: T) => string): Record<string, number> {
+      return this.data.reduce((acc, item) => {
+        const key = predicate(item);
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+    }
+  }
+  
+  // 8. Example of using the Analytics class
+  function demoAnalytics(inventoryService: InventoryService) {
+    const orders = inventoryService.getOrders();
+    const analytics = new Analytics(orders);
+  
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+  
+    console.log('Orders in the last 24 hours:',
+      analytics.filterByDateRange(yesterday, today).length
+    );
+  
+    console.log('Orders by status:',
+      analytics.countBy(order => order.status)
+    );
+  }
+  // 9. Extended Product with variants
+  interface ProductVariant {
+    id: string;
+    name: string;
+    priceModifier: number;
+    stock: number;
+  }
+  
+  interface ExtendedProduct extends Product {
+    variants?: ProductVariant[];
+    description: string;
+    tags: string[];
+  }
+  
+  // 10. Discount and Promotion system
+  interface Discount {
+    id: string;
+    code: string;
+    percentage: number;
+    validUntil: Date;
+    applicableCategories: string[];
+  }
+  
+  class PromotionManager {
+    private discounts: Discount[] = [];
+  
+    addDiscount(discount: Discount): void {
+      this.discounts.push(discount);
+    }
+  
+    getValidDiscounts(category: string): Discount[] {
+      const now = new Date();
+      return this.discounts.filter(d => 
+        (d.applicableCategories.includes(category) || d.applicableCategories.length === 0) &&
+        d.validUntil > now
+      );
+    }
+  
   
   // Async function to simulate fetching data         value,
   async function fetchData(): Promise<string> {          period: 'minute',
