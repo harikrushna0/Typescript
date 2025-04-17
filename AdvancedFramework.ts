@@ -92,21 +92,130 @@ namespace AdvancedFramework {
         endpoint: string;
     }
 
-    // Core Classes
-    class Application {
-        private errorHandler: ErrorHandler;
-        private metrics: MetricsCollector;
-        private profiler: PerformanceProfiler;
-        private logger: Logger;
-        private config: ApplicationConfig;
+   // Dependencies assumed for illustration purposes
+import { ErrorHandler } from './core/ErrorHandler';
+import { MetricsCollector } from './core/MetricsCollector';
+import { PerformanceProfiler } from './core/PerformanceProfiler';
+import { Logger } from './core/Logger';
+import { ApplicationConfig } from './types/ApplicationConfig';
+import { DatabaseConnection } from './infrastructure/DatabaseConnection';
+import { CacheManager } from './infrastructure/CacheManager';
+import { HttpServer } from './server/HttpServer';
 
-        constructor(config: ApplicationConfig) {
-            this.validateConfig(config);
-            this.initializeCore(config);
-            this.setupErrorHandling();
-            this.setupMetrics();
-            this.setupProfiling();
+class Application {
+    private errorHandler: ErrorHandler;
+    private metrics: MetricsCollector;
+    private profiler: PerformanceProfiler;
+    private logger: Logger;
+    private config: ApplicationConfig;
+    private db: DatabaseConnection;
+    private cache: CacheManager;
+    private server: HttpServer;
+
+    constructor(config: ApplicationConfig) {
+        this.validateConfig(config);
+        this.config = config;
+
+        this.logger = new Logger(config.logLevel);
+        this.logger.info('Initializing application...');
+
+        this.initializeCoreServices();
+        this.initializeInfrastructure();
+        this.initializeServer();
+
+        this.setupErrorHandling();
+        this.setupMetrics();
+        this.setupProfiling();
+
+        this.logger.info('Application initialized successfully.');
+    }
+
+    // ✅ Added more robust config validation
+    private validateConfig(config: ApplicationConfig): void {
+        if (!config) throw new Error('Missing configuration');
+        if (!config.port) throw new Error('Port number not specified in configuration');
+        if (!config.databaseUrl) throw new Error('Missing database connection URL');
+        if (!config.cacheConfig) throw new Error('Missing cache configuration');
+        if (!config.environment) config.environment = 'development';
+    }
+
+    private initializeCoreServices(): void {
+        this.logger.debug('Initializing core services...');
+        this.errorHandler = new ErrorHandler(this.logger);
+        this.metrics = new MetricsCollector();
+        this.profiler = new PerformanceProfiler();
+    }
+
+    private initializeInfrastructure(): void {
+        this.logger.debug('Initializing infrastructure...');
+        this.db = new DatabaseConnection(this.config.databaseUrl);
+        this.cache = new CacheManager(this.config.cacheConfig);
+
+        this.db.connect().then(() => {
+            this.logger.info('Database connected.');
+        }).catch((err) => {
+            this.logger.error('Database connection failed.', err);
+            process.exit(1);
+        });
+
+        this.cache.initialize().then(() => {
+            this.logger.info('Cache system ready.');
+        }).catch((err) => {
+            this.logger.warn('Cache system failed to initialize.', err);
+        });
+    }
+
+    private initializeServer(): void {
+        this.logger.debug('Starting HTTP server...');
+        this.server = new HttpServer(this.config.port, this.logger);
+    }
+
+    private setupErrorHandling(): void {
+        process.on('uncaughtException', (err) => {
+            this.logger.error('Uncaught Exception:', err);
+            this.errorHandler.handle(err);
+        });
+
+        process.on('unhandledRejection', (reason: any) => {
+            this.logger.error('Unhandled Rejection:', reason);
+            this.errorHandler.handle(reason);
+        });
+    }
+
+    private setupMetrics(): void {
+        this.logger.debug('Setting up metrics collector...');
+        this.metrics.start();
+    }
+
+    private setupProfiling(): void {
+        this.logger.debug('Setting up performance profiler...');
+        this.profiler.initialize();
+    }
+
+    public async start(): Promise<void> {
+        try {
+            await this.server.start();
+            this.logger.info(`Server running on port ${this.config.port}`);
+        } catch (err) {
+            this.logger.error('Failed to start server', err);
+            throw err;
         }
+    }
+
+    public async shutdown(): Promise<void> {
+        this.logger.info('Shutting down application...');
+
+        try {
+            await this.server.stop();
+            await this.db.disconnect();
+            await this.cache.shutdown();
+            this.logger.info('Application shutdown complete.');
+        } catch (err) {
+            this.logger.error('Error during shutdown:', err);
+        }
+    }
+}
+
 
         private async initializeCore(config: ApplicationConfig): Promise<void> {
             // Core initialization logic

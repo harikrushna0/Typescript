@@ -32,59 +32,229 @@ interface Product {
     createdAt: Date;
   }
   
-  // 2. Create decorators
-  function logOperation(target: any, key: string, descriptor: PropertyDescriptor) {
-    const originalMethod = descriptor.value;
-    descriptor.value = function (...args: any[]) {
-      console.log(`Executing ${key} with args: ${JSON.stringify(args)}`);
-      const result = originalMethod.apply(this, args);
-      console.log(`Completed ${key} with result: ${JSON.stringify(result)}`);
-      return result;
-    };
-    return descriptor;
-  }
-  
-  function validateProduct(target: any, key: string, descriptor: PropertyDescriptor) {
-    const originalMethod = descriptor.value;
-    descriptor.value = function (product: Product) {
-      if (!product.id || !product.name || product.price <= 0) {
-        throw new Error('Invalid product data');
-      }
-      return originalMethod.apply(this, [product]);
-    };
-    return descriptor;
-  }
-  
-  // 3. Create generic repository
-  class Repository<T extends { id: string }> {
-    private items: T[] = [];
-  
-    add(item: T): void {
-      this.items.push(item);
+  class EnhancedDataProcessor {
+    private readonly validator: DataValidator;
+    private readonly transformer: DataTransformer;
+    private readonly errorHandler: ErrorHandler;
+    private readonly metrics: MetricsCollector;
+    private readonly logger: Logger;
+    private readonly cache: DataCache;
+    private readonly hooks: Map<string, Function[]> = new Map();
+    private readonly stats: Map<string, number> = new Map();
+    private readonly featureFlags: Map<string, boolean> = new Map();
+    private readonly healthChecks: Map<string, () => boolean> = new Map();
+
+    constructor(config: ProcessorConfig) {
+        this.validator = new DataValidator(config.validation);
+        this.transformer = new DataTransformer(config.transformation);
+        this.errorHandler = new ErrorHandler(config.errorHandling);
+        this.metrics = new MetricsCollector('data-processor');
+        this.logger = new Logger('EnhancedDataProcessor');
+        this.cache = new DataCache(config.caching);
+        this.initializeProcessor();
+        this.initializeFeatureFlags();
+        this.setupHealthChecks();
     }
-  
-    getById(id: string): T | undefined {
-      return this.items.find(item => item.id === id);
+
+    private initializeProcessor(): void {
+        this.logger.info('Processor initialized');
+        this.registerDefaultHooks();
     }
-  
-    getAll(): T[] {
-      return [...this.items];
+
+    private initializeFeatureFlags(): void {
+        this.featureFlags.set('useExperimentalTransform', false);
+        this.featureFlags.set('enableLoggingMetrics', true);
+        this.featureFlags.set('failOnValidationWarning', false);
+        this.featureFlags.set('enableCaching', true);
+        this.featureFlags.set('strictMode', false);
+        this.logger.debug('Feature flags initialized');
     }
-  
-    update(id: string, updateFn: (item: T) => T): boolean {
-      const index = this.items.findIndex(item => item.id === id);
-      if (index === -1) return false;
-      this.items[index] = updateFn(this.items[index]);
-      return true;
+
+    private setupHealthChecks(): void {
+        this.healthChecks.set('cacheAvailable', () => this.cache.isAvailable());
+        this.healthChecks.set('validatorReady', () => this.validator.isReady());
+        this.healthChecks.set('transformerActive', () => this.transformer.isConfigured());
     }
-  
-    delete(id: string): boolean {
-      const initialLength = this.items.length;
-      this.items = this.items.filter(item => item.id !== id);
-      return this.items.length !== initialLength;
+
+    public checkHealth(): Record<string, boolean> {
+        const result: Record<string, boolean> = {};
+        for (const [key, checkFn] of this.healthChecks) {
+            try {
+                result[key] = checkFn();
+            } catch (err) {
+                this.logger.warn(`Health check failed: ${key}`, err);
+                result[key] = false;
+            }
+        }
+        return result;
     }
-  }
-  
+
+    public async process(data: InputData): Promise<ProcessedData> {
+        const startTime = Date.now();
+        this.logger.debug('Processing started');
+
+        try {
+            this.invokeHooks('beforeValidate', data);
+            this.validator.validate(data);
+            this.invokeHooks('afterValidate', data);
+
+            this.invokeHooks('beforeTransform', data);
+            let transformed: ProcessedData;
+            if (this.featureFlags.get('useExperimentalTransform')) {
+                transformed = this.transformer.experimentalTransform(data);
+            } else {
+                transformed = this.transformer.transform(data);
+            }
+            this.invokeHooks('afterTransform', transformed);
+
+            if (this.featureFlags.get('enableCaching')) {
+                this.cache.store(transformed.id, transformed);
+                this.logger.debug('Data processed and cached');
+            }
+
+            const duration = Date.now() - startTime;
+            this.metrics.record('processingTime', duration);
+            this.stats.set('lastDuration', duration);
+            if (this.featureFlags.get('enableLoggingMetrics')) {
+                this.logger.debug(`Processing duration: ${duration}ms`);
+            }
+
+            return transformed;
+        } catch (error) {
+            this.logger.error('Processing failed', error);
+            this.metrics.increment('errorCount');
+            this.errorHandler.handle(error);
+            throw error;
+        }
+    }
+
+    public registerHook(event: string, hookFn: Function): void {
+        if (!this.hooks.has(event)) {
+            this.hooks.set(event, []);
+        }
+        this.hooks.get(event)!.push(hookFn);
+        this.logger.debug(`Hook registered for event: ${event}`);
+    }
+
+    private invokeHooks(event: string, data: any): void {
+        const eventHooks = this.hooks.get(event) || [];
+        for (const hook of eventHooks) {
+            try {
+                hook(data);
+            } catch (err) {
+                this.logger.warn(`Hook for ${event} failed`, err);
+            }
+        }
+    }
+
+    private registerDefaultHooks(): void {
+        this.registerHook('beforeValidate', (data: any) => {
+            this.logger.debug('Default beforeValidate hook invoked');
+        });
+        this.registerHook('afterTransform', (data: any) => {
+            this.logger.debug('Default afterTransform hook invoked');
+        });
+    }
+
+    public async refreshConfig(newConfig: ProcessorConfig): Promise<void> {
+        this.logger.info('Refreshing processor configuration');
+        this.validator.updateConfig(newConfig.validation);
+        this.transformer.updateConfig(newConfig.transformation);
+        this.errorHandler.updateConfig(newConfig.errorHandling);
+        this.cache.updateConfig(newConfig.caching);
+        this.logger.info('Configuration refreshed');
+    }
+
+    public clearCache(): void {
+        this.cache.clear();
+        this.logger.info('Cache cleared');
+    }
+
+    public getMetrics(): Record<string, number> {
+        return this.metrics.getSnapshot();
+    }
+
+    public getStat(key: string): number | undefined {
+        return this.stats.get(key);
+    }
+
+    public resetStats(): void {
+        this.stats.clear();
+        this.logger.info('Statistics reset');
+    }
+
+    public async batchProcess(dataList: InputData[]): Promise<ProcessedData[]> {
+        const results: ProcessedData[] = [];
+        for (const data of dataList) {
+            try {
+                const result = await this.process(data);
+                results.push(result);
+            } catch (err) {
+                this.logger.warn('Failed to process item in batch', err);
+            }
+        }
+        return results;
+    }
+
+    public enableDebugMode(enable: boolean): void {
+        if (enable) {
+            this.logger.setLevel('debug');
+        } else {
+            this.logger.setLevel('info');
+        }
+    }
+
+    public async exportProcessedData(ids: string[]): Promise<string> {
+        const exported: ProcessedData[] = [];
+        for (const id of ids) {
+            const data = this.cache.get(id);
+            if (data) exported.push(data);
+        }
+        return JSON.stringify(exported);
+    }
+
+    public importProcessedData(jsonData: string): void {
+        try {
+            const parsed: ProcessedData[] = JSON.parse(jsonData);
+            for (const item of parsed) {
+                this.cache.store(item.id, item);
+            }
+            this.logger.info('Imported processed data into cache');
+        } catch (err) {
+            this.logger.error('Failed to import processed data', err);
+        }
+    }
+
+    public simulateError(): void {
+        this.logger.debug('Simulating error');
+        throw new Error('Simulated error for testing');
+    }
+
+    public toggleFeature(feature: string, enable: boolean): void {
+        this.featureFlags.set(feature, enable);
+        this.logger.info(`Feature '${feature}' toggled to ${enable}`);
+    }
+
+    public listFeatures(): string[] {
+        return Array.from(this.featureFlags.keys());
+    }
+
+    public getFeatureStatus(feature: string): boolean {
+        return this.featureFlags.get(feature) || false;
+    }
+
+    public logSummary(): void {
+        this.logger.info('--- Processor Summary ---');
+        this.logger.info(`Features: ${JSON.stringify(this.featureFlags)}`);
+        this.logger.info(`Stats: ${JSON.stringify(Object.fromEntries(this.stats))}`);
+        this.logger.info(`Health: ${JSON.stringify(this.checkHealth())}`);
+    }
+
+    public listRegisteredHooks(): string[] {
+        return Array.from(this.hooks.keys());
+    }
+}
+
   // 4. Create inventory service
   class InventoryService {
     private productRepository = new Repository<Product>();
