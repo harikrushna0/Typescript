@@ -439,51 +439,136 @@ function validateProduct(target: any, key: string, descriptor: PropertyDescripto
     };
     return descriptor;
 }
+class EnhancedDataProcessor {
+    private readonly validator: DataValidator;
+    private readonly transformer: DataTransformer;
+    private readonly errorHandler: ErrorHandler;
+    private readonly metrics: MetricsCollector;
+    private readonly logger: Logger;
+    private readonly cache: DataCache;
+    private readonly hooks: Map<string, Function[]> = new Map();
+    private readonly stats: Map<string, number> = new Map();
+    private readonly featureFlags: Map<string, boolean> = new Map();
+    private readonly healthChecks: Map<string, () => boolean> = new Map();
+    private readonly jobs: Map<string, JobDefinition> = new Map();
+    private readonly retryPolicy: RetryPolicy;
+    private readonly productRepository = new Repository<Product>();
+    private readonly inventory: InventoryItem[] = [];
+    private readonly orderRepository = new Repository<Order>();
 
-// 3. Create generic repository
-class Repository<T extends { id: string }> {
-    private items: T[] = [];
-
-    add(item: T): void {
-        this.items.push(item);
+    constructor(config: ProcessorConfig) {
+        this.validator = new DataValidator(config.validation);
+        this.transformer = new DataTransformer(config.transformation);
+        this.errorHandler = new ErrorHandler(config.errorHandling);
+        this.metrics = new MetricsCollector('data-processor');
+        this.logger = new Logger('EnhancedDataProcessor');
+        this.cache = new DataCache(config.caching);
+        this.retryPolicy = config.retryPolicy;
+        this.initializeProcessor();
+        this.initializeFeatureFlags();
+        this.setupHealthChecks();
+        this.setupEventListeners();
     }
 
-    getById(id: string): T | undefined {
-        return this.items.find(item => item.id === id);
+    private setupEventListeners(): void {
+        this.on('jobCompleted', ({ jobId, result }) => {
+            this.handleJobCompletion(jobId, result);
+        });
+
+        this.on('jobFailed', ({ jobId, error }) => {
+            this.handleJobFailure(jobId, error);
+        });
+
+        this.on('healthCheck', (status) => {
+            this.handleHealthCheckStatus(status);
+        });
     }
 
-    getAll(): T[] {
-        return [...this.items];
+    private async handleJobCompletion(jobId: string, result: any): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        try {
+            await this.updateJobStatus(jobId, 'COMPLETED');
+            await this.metrics.recordSuccess(jobId);
+            await this.calculateAndUpdateNextRun(job);
+            await this.notifySubscribers(job, result);
+
+            if (job.chainedJobs?.length) {
+                await this.triggerChainedJobs(job.chainedJobs);
+            }
+        } catch (error) {
+            this.logger.error('Error handling job completion', { jobId, error });
+        }
     }
 
-    update(id: string, updateFn: (item: T) => T): boolean {
-        const index = this.items.findIndex(item => item.id === id);
-        if (index === -1) return false;
-        this.items[index] = updateFn(this.items[index]);
-        return true;
+    private async handleJobFailure(jobId: string, error: Error): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+
+        try {
+            const retryDecision = await this.retryPolicy.shouldRetry(job, error);
+
+            if (retryDecision.shouldRetry) {
+                await this.scheduleRetry(job, retryDecision.delay);
+            } else {
+                await this.handleFinalFailure(job, error);
+            }
+
+            await this.metrics.recordFailure(jobId, error);
+            await this.notifyAdmins(job, error);
+        } catch (secondaryError) {
+            this.logger.error('Error handling job failure', {
+                jobId,
+                originalError: error,
+                handlingError: secondaryError
+            });
+        }
     }
 
-    delete(id: string): boolean {
-        const initialLength = this.items.length;
-        this.items = this.items.filter(item => item.id !== id);
-        return this.items.length !== initialLength;
+    private async scheduleRetry(job: JobDefinition, delay: number): Promise<void> {
+        const retryJob = {
+            ...job,
+            retryCount: (job.retryCount || 0) + 1,
+            nextRun: new Date(Date.now() + delay),
+            status: 'PENDING_RETRY'
+        };
+
+        await this.updateJob(job.id, retryJob);
+        this.emit('jobScheduledForRetry', { jobId: job.id, retryCount: retryJob.retryCount });
     }
-}
 
-// 4. Create inventory service
-class InventoryService {
-    private productRepository = new Repository<Product>();
-    private inventory: InventoryItem[] = [];
-    private orderRepository = new Repository<Order>();
+    private async handleFinalFailure(job: JobDefinition, error: Error): Promise<void> {
+        await this.updateJobStatus(job.id, 'FAILED');
+        await this.metrics.recordFinalFailure(job.id);
 
-    @logOperation
-    @validateProduct
-    addProduct(product: Product): void {
+        if (job.failureHandlerJob) {
+            await this.triggerFailureHandler(job, error);
+        }
+
+        this.emit('jobFinalFailure', {
+            jobId: job.id,
+            error,
+            attempts: job.retryCount || 1
+        });
+    }
+
+    private async calculateAndUpdateNextRun(job: JobDefinition): Promise<void> {
+        const nextRun = this.calculateNextRun(job);
+        if (nextRun) {
+            await this.updateJob(job.id, {
+                ...job,
+                nextRun,
+                lastRun: new Date()
+            });
+        }
+    }
+
+    private addProduct(product: Product): void {
         this.productRepository.add(product);
     }
 
-    @logOperation
-    addStock(productId: string, quantity: number): boolean {
+    private addStock(productId: string, quantity: number): boolean {
         const product = this.productRepository.getById(productId);
         if (!product) return false;
 
@@ -496,8 +581,7 @@ class InventoryService {
         return true;
     }
 
-    @logOperation
-    removeStock(productId: string, quantity: number): boolean {
+    private removeStock(productId: string, quantity: number): boolean {
         const existingItem = this.inventory.find(item => item.product.id === productId);
         if (!existingItem || existingItem.quantity < quantity) return false;
 
@@ -508,15 +592,12 @@ class InventoryService {
         return true;
     }
 
-    @logOperation
-    createOrder(productQuantities: { productId: string; quantity: number }[]): Order | null {
-        // Check stock availability
+    private createOrder(productQuantities: { productId: string; quantity: number }[]): Order | null {
         for (const pq of productQuantities) {
             const item = this.inventory.find(i => i.product.id === pq.productId);
             if (!item || item.quantity < pq.quantity) return null;
         }
 
-        // Create order
         const order: Order = {
             id: `ord-${Date.now()}`,
             products: productQuantities,
@@ -528,26 +609,76 @@ class InventoryService {
         return order;
     }
 
-    @logOperation
-    async processOrder(orderId: string): Promise<boolean> {
+    private async processOrder(orderId: string): Promise<boolean> {
         const order = this.orderRepository.getById(orderId);
         if (!order || order.status !== 'pending') return false;
 
-        // Update order status to processing
         this.orderRepository.update(orderId, (o) => ({ ...o, status: 'processing' }));
-
-        // Simulate async processing (e.g., payment, shipping)
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // Deduct stock
         for (const pq of order.products) {
             this.removeStock(pq.productId, pq.quantity);
         }
 
-        // Update order status to completed
         this.orderRepository.update(orderId, (o) => ({ ...o, status: 'completed' }));
         return true;
     }
+
+    private on(event: string, listener: (...args: any[]) => void): void {
+        if (!this.hooks.has(event)) {
+            this.hooks.set(event, []);
+        }
+        this.hooks.get(event)!.push(listener);
+    }
+
+    private emit(event: string, data: any): void {
+        const listeners = this.hooks.get(event) || [];
+        for (const listener of listeners) {
+            try {
+                listener(data);
+            } catch (error) {
+                this.logger.warn(`Error in event listener for ${event}`, error);
+            }
+        }
+    }
+
+    private handleHealthCheckStatus(status: any): void {
+        this.logger.info('Health check status received', status);
+    }
+
+    private async updateJobStatus(jobId: string, status: string): Promise<void> {
+        const job = this.jobs.get(jobId);
+        if (!job) return;
+        job.status = status;
+        this.jobs.set(jobId, job);
+    }
+
+    private async updateJob(jobId: string, updatedJob: JobDefinition): Promise<void> {
+        this.jobs.set(jobId, updatedJob);
+    }
+
+    private async notifySubscribers(job: JobDefinition, result: any): Promise<void> {
+        this.logger.info(`Notifying subscribers of job ${job.id}`);
+    }
+
+    private async triggerChainedJobs(chainedJobs: string[]): Promise<void> {
+        this.logger.info('Triggering chained jobs:', chainedJobs);
+    }
+
+    private async notifyAdmins(job: JobDefinition, error: Error): Promise<void> {
+        this.logger.error(`Admin notification for failed job ${job.id}`, error);
+    }
+
+    private async triggerFailureHandler(job: JobDefinition, error: Error): Promise<void> {
+        this.logger.info(`Triggering failure handler for job ${job.id}`);
+    }
+
+    private calculateNextRun(job: JobDefinition): Date | null {
+        const interval = job.scheduleInterval || 0;
+        return interval ? new Date(Date.now() + interval) : null;
+    }
+}
+
 
     getInventory(): InventoryItem[] {
         return [...this.inventory];

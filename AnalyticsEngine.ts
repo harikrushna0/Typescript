@@ -78,19 +78,217 @@ interface RealTimeMetrics {
     timestamp: Date;
 }
 
-class RealTimeAnalytics {
-    private metrics: RealTimeMetrics[] = [];
-    private readonly retentionPeriod = 24 * 60 * 60 * 1000; // 24 hours
+// Mock dependencies & types (expand as needed)
+interface RealTimeMetrics {
+  timestamp: number;
+  eventCount: number;
+  processingTime: number;
+  errorCount: number;
+  errorRate: number;
+  tags?: Record<string, string>;
+}
 
-    public trackEvent(processingTime: number, hasError: boolean): void {
-        const currentMetric = this.getCurrentMetric();
-        currentMetric.eventCount++;
-        currentMetric.processingTime += processingTime;
-        if (hasError) {
-            currentMetric.errorRate = currentMetric.eventCount === 0 ? 
-                1 : (currentMetric.errorRate * (currentMetric.eventCount - 1) + 1) / currentMetric.eventCount;
-        }
-    }
+interface AnalyticsConfig {
+  retentionPeriodMs?: number;
+  samplingIntervalMs?: number;
+  autoCleanup?: boolean;
+  emitToPrometheus?: boolean;
+}
+
+interface SerializedMetric {
+  timestamp: number;
+  eventCount: number;
+  processingTime: number;
+  errorCount: number;
+  tags?: Record<string, string>;
+}
+
+export class RealTimeAnalytics {
+  private metrics: RealTimeMetrics[] = [];
+  private readonly retentionPeriod: number;
+  private readonly samplingInterval: number;
+  private readonly autoCleanup: boolean;
+  private readonly emitToPrometheus: boolean;
+  private cleanupTimer: NodeJS.Timeout | null = null;
+
+  constructor(config?: AnalyticsConfig) {
+      this.retentionPeriod = config?.retentionPeriodMs ?? 24 * 60 * 60 * 1000;
+      this.samplingInterval = config?.samplingIntervalMs ?? 60 * 1000;
+      this.autoCleanup = config?.autoCleanup ?? true;
+      this.emitToPrometheus = config?.emitToPrometheus ?? false;
+
+      if (this.autoCleanup) {
+          this.startAutoCleanup();
+      }
+  }
+
+  public trackEvent(processingTime: number, hasError: boolean, tags?: Record<string, string>): void {
+      const metric = this.getCurrentMetric(tags);
+      metric.eventCount++;
+      metric.processingTime += processingTime;
+
+      if (hasError) {
+          metric.errorCount++;
+      }
+
+      metric.errorRate = metric.eventCount === 0 ? 0 : metric.errorCount / metric.eventCount;
+
+      if (this.emitToPrometheus) {
+          this.emitMetricToPrometheus(metric);
+      }
+  }
+
+  private getCurrentMetric(tags?: Record<string, string>): RealTimeMetrics {
+      const now = Date.now();
+      const last = this.metrics[this.metrics.length - 1];
+
+      if (last && now - last.timestamp < this.samplingInterval) {
+          return last;
+      }
+
+      const newMetric: RealTimeMetrics = {
+          timestamp: now,
+          eventCount: 0,
+          processingTime: 0,
+          errorCount: 0,
+          errorRate: 0,
+          tags,
+      };
+
+      this.metrics.push(newMetric);
+      return newMetric;
+  }
+
+  private cleanupOldMetrics(): void {
+      const cutoff = Date.now() - this.retentionPeriod;
+      this.metrics = this.metrics.filter(m => m.timestamp >= cutoff);
+  }
+
+  private startAutoCleanup(): void {
+      this.cleanupTimer = setInterval(() => {
+          this.cleanupOldMetrics();
+      }, this.samplingInterval);
+  }
+
+  public stopAutoCleanup(): void {
+      if (this.cleanupTimer) {
+          clearInterval(this.cleanupTimer);
+          this.cleanupTimer = null;
+      }
+  }
+
+  public getMetricsSnapshot(): RealTimeMetrics[] {
+      this.cleanupOldMetrics();
+      return [...this.metrics];
+  }
+
+  public resetMetrics(): void {
+      this.metrics = [];
+  }
+
+  public getSummary(): Record<string, number> {
+      return {
+          totalEvents: this.getTotalEvents(),
+          totalErrors: this.getTotalErrors(),
+          avgProcessingTime: this.getAverageProcessingTime(),
+          overallErrorRate: this.getOverallErrorRate(),
+      };
+  }
+
+  public getAverageProcessingTime(): number {
+      const totalProcessing = this.metrics.reduce((sum, m) => sum + m.processingTime, 0);
+      const totalEvents = this.getTotalEvents();
+      return totalEvents === 0 ? 0 : totalProcessing / totalEvents;
+  }
+
+  public getOverallErrorRate(): number {
+      const totalErrors = this.getTotalErrors();
+      const totalEvents = this.getTotalEvents();
+      return totalEvents === 0 ? 0 : totalErrors / totalEvents;
+  }
+
+  public getTotalEvents(): number {
+      return this.metrics.reduce((sum, m) => sum + m.eventCount, 0);
+  }
+
+  public getTotalErrors(): number {
+      return this.metrics.reduce((sum, m) => sum + m.errorCount, 0);
+  }
+
+  public getSummarizedByTag(tagKey: string): Record<string, Record<string, number>> {
+      const summary: Record<string, { events: number; errors: number; processing: number }> = {};
+
+      this.metrics.forEach(metric => {
+          const tagValue = metric.tags?.[tagKey] ?? 'undefined';
+          if (!summary[tagValue]) {
+              summary[tagValue] = { events: 0, errors: 0, processing: 0 };
+          }
+          summary[tagValue].events += metric.eventCount;
+          summary[tagValue].errors += metric.errorCount;
+          summary[tagValue].processing += metric.processingTime;
+      });
+
+      const result: Record<string, Record<string, number>> = {};
+      for (const key in summary) {
+          const data = summary[key];
+          result[key] = {
+              totalEvents: data.events,
+              totalErrors: data.errors,
+              avgProcessingTime: data.events === 0 ? 0 : data.processing / data.events,
+              errorRate: data.events === 0 ? 0 : data.errors / data.events,
+          };
+      }
+
+      return result;
+  }
+
+  private emitMetricToPrometheus(metric: RealTimeMetrics): void {
+      // Mock Prometheus emit logic
+      console.log(`[Prometheus] EventCount: ${metric.eventCount}, ErrorRate: ${metric.errorRate.toFixed(2)}`);
+  }
+
+  public exportMetricsToJSON(): string {
+      const serialized: SerializedMetric[] = this.metrics.map(m => ({
+          timestamp: m.timestamp,
+          eventCount: m.eventCount,
+          processingTime: m.processingTime,
+          errorCount: m.errorCount,
+          tags: m.tags,
+      }));
+      return JSON.stringify(serialized, null, 2);
+  }
+
+  public importMetricsFromJSON(json: string): void {
+      try {
+          const parsed: SerializedMetric[] = JSON.parse(json);
+          parsed.forEach(m => {
+              this.metrics.push({
+                  timestamp: m.timestamp,
+                  eventCount: m.eventCount,
+                  processingTime: m.processingTime,
+                  errorCount: m.errorCount,
+                  errorRate: m.eventCount === 0 ? 0 : m.errorCount / m.eventCount,
+                  tags: m.tags,
+              });
+          });
+      } catch (err) {
+          console.error('Failed to import metrics:', err);
+      }
+  }
+
+  public simulateTimeAdvance(ms: number): void {
+      // For test environments: could inject mocked time
+  }
+
+  public logSummaryToConsole(): void {
+      const summary = this.getSummary();
+      console.log(`\n--- RealTimeAnalytics Summary ---`);
+      console.log(`Total Events       : ${summary.totalEvents}`);
+      console.log(`Total Errors       : ${summary.totalErrors}`);
+      console.log(`Avg Processing Time: ${summary.avgProcessingTime.toFixed(2)}ms`);
+      console.log(`Overall Error Rate : ${(summary.overallErrorRate * 100).toFixed(2)}%`);
+  }
+}
 
     private getCurrentMetric(): RealTimeMetrics {
         const current = this.metrics[this.metrics.length - 1];

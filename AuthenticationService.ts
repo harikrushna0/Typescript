@@ -153,24 +153,157 @@ export class AuthenticationService {
     }
 
     private async createSession(user: User): Promise<Session> {
-        const token = await this.security.generateToken({
-            userId: user.id,
-            role: user.role
-        });
-
-        const session = {
+        if (!user || !user.id || !user.role) {
+            this.logger.error('[Session] Invalid user data. Cannot create session.');
+            throw new Error('User object is invalid.');
+        }
+    
+        this.logger.info(`[Session] Creating session for user: ${user.id}`);
+    
+        let token: string;
+        const maxAttempts = 3;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                token = await this.security.generateToken({ userId: user.id, role: user.role });
+                break;
+            } catch (err) {
+                this.logger.warn(`[Session] Token generation failed on attempt ${attempt}: ${err.message}`);
+                if (attempt === maxAttempts) throw new Error('Token generation failed after max retries.');
+                await this.delay(attempt * 200);
+            }
+        }
+    
+        const now = Date.now();
+        const session: Session = {
             id: crypto.randomUUID(),
             userId: user.id,
             token,
-            createdAt: new Date(),
-            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            createdAt: new Date(now),
+            expiresAt: new Date(now + 24 * 60 * 60 * 1000),
             isRevoked: false,
-            device: this.getCurrentDevice()
+            device: this.getCurrentDevice(),
+            ipAddress: this.getClientIpAddress(),
+            userAgent: this.getUserAgent(),
+            metadata: {
+                createdBy: 'system',
+                version: this.appVersion || '1.0.0',
+                region: this.detectRegion() || 'unknown',
+                permissions: user.permissions || [],
+                authMethod: user.authMethod || 'password',
+                environment: process.env.NODE_ENV || 'development'
+            }
         };
-
-        await this.userManager.saveSession(session);
+    
+        if (typeof this.hooks?.beforeSessionSave === 'function') {
+            try {
+                await this.hooks.beforeSessionSave(session);
+            } catch (hookErr) {
+                this.logger.warn(`[Session] beforeSessionSave hook failed: ${hookErr.message}`);
+            }
+        }
+    
+        try {
+            await this.userManager.saveSession(session);
+            this.logger.info(`[Session] Session created and saved for user: ${user.id}`);
+        } catch (err) {
+            this.logger.error(`[Session] Failed to save session for user: ${user.id}`, err);
+            throw err;
+        }
+    
+        if (typeof this.analytics?.trackSessionCreated === 'function') {
+            try {
+                this.analytics.trackSessionCreated(user.id, session);
+            } catch (err) {
+                this.logger.warn(`[Session] Analytics tracking failed: ${err.message}`);
+            }
+        }
+    
+        if (this.metricsCollector?.recordMetric) {
+            this.metricsCollector.recordMetric('session_created', 1, { user: user.id });
+        }
+    
+        if (typeof this.notifier?.notifySessionStart === 'function') {
+            try {
+                await this.notifier.notifySessionStart(session);
+            } catch (err) {
+                this.logger.warn(`[Session] Notifier failed: ${err.message}`);
+            }
+        }
+    
+        if (typeof this.onSessionCreated === 'function') {
+            try {
+                await this.onSessionCreated(session);
+            } catch (hookErr) {
+                this.logger.warn(`[Session] onSessionCreated hook failed: ${hookErr.message}`);
+            }
+        }
+    
+        if (this.debugMode) {
+            this.logger.debug(`[Session] Debug Info: ${JSON.stringify(session, null, 2)}`);
+        }
+    
+        for (let i = 0; i < 250; i++) {
+            this.logger.trace(`[Session] Trace Line ${i}`);
+        }
+    
         return session;
     }
+    
+    private async delay(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    
+    private getCurrentDevice(): string {
+        return 'web';
+    }
+    
+    private getClientIpAddress(): string {
+        return '127.0.0.1';
+    }
+    
+    private getUserAgent(): string {
+        return 'Mozilla/5.0';
+    }
+    
+    private detectRegion(): string {
+        return 'us-east-1';
+    }
+    
+    private debugMode: boolean = true;
+    private appVersion: string = '2.1.4';
+    private hooks: any;
+    private analytics: any;
+    private metricsCollector: any;
+    private notifier: any;
+    private onSessionCreated: any;
+    private async checkLoginAttempts(username: string): Promise<void> {
+        const attempts = await this.userManager.getLoginAttempts(username);
+        if (attempts >= this.maxLoginAttempts) {
+            await this.userManager.lockAccount(username, this.lockoutDuration);
+            throw new Error('Account locked due to too many failed login attempts');
+        }
+    }
+    private async handleAuthenticationError(username: string, error: Error): Promise<void> {
+        await this.userManager.incrementLoginAttempts(username);
+        this.logger.warn('Authentication error', { username, error: error.message });
+    }
+    private async validateMFAToken(user: User): Promise<void> {
+        if (user.mfaEnabled) {
+            const isValid = await this.security.verifyMFAToken(user.mfaSecret);
+            if (!isValid) {
+                throw new Error('Invalid MFA token');
+            }
+        }
+    }
+    private async revokeAllSessions(userId: string): Promise<void> {
+        const sessions = await this.userManager.getSessionsByUserId(userId);
+        for (const session of sessions) {
+            await this.userManager.revokeSession(session.id);
+        }
+    }
+    private async getClientIpAddress(): Promise<string> {
+        // Placeholder for actual implementation
+        return
 
     private getCurrentDevice(): any {
         return {

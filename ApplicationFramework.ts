@@ -1303,19 +1303,130 @@ class PromotionManager {
                 }
             }
         }
-
         private async initializeModule(moduleName: string): Promise<void> {
-            const moduleConfig = this.config.modules.find(m => m.name === moduleName);
-            if (!moduleConfig || !moduleConfig.enabled) return;
-
-            const module = await this.createModule(moduleConfig);
-            await this.validateModuleHealth(module);
-            await this.registerModuleEventHandlers(module);
-            await this.initializeModuleState(module);
-            await this.startModuleMetrics(module);
-
-            this.modules.set(moduleName, module);
-        }
+          // ─────[ 1. Input Validation ]────────────────────────────
+          if (!moduleName || typeof moduleName !== 'string') {
+              this.logger.error(`[Init] Invalid module name: ${moduleName}`);
+              throw new Error(`Module name must be a non-empty string.`);
+          }
+      
+          // ─────[ 2. Configuration Lookup ]────────────────────────
+          const moduleConfig = this.config.modules.find(m => m.name === moduleName);
+      
+          if (!moduleConfig) {
+              this.logger.warn(`[Init] Module "${moduleName}" not found in config.`);
+              return;
+          }
+      
+          if (!moduleConfig.enabled) {
+              this.logger.info(`[Init] Module "${moduleName}" is disabled. Skipping.`);
+              return;
+          }
+      
+          // ─────[ 3. Dry Run Support ]──────────────────────────────
+          if (moduleConfig.dryRun) {
+              this.logger.info(`[Init] Module "${moduleName}" is in dry-run mode.`);
+              return;
+          }
+      
+          // ─────[ 4. Performance Timing ]───────────────────────────
+          const startTime = Date.now();
+          this.logger.info(`[Init] Starting module initialization: ${moduleName}`);
+      
+          // ─────[ 5. Initialization Retry Wrapper ]────────────────
+          let attempt = 0;
+          const maxRetries = moduleConfig.retries ?? 1;
+      
+          while (attempt < maxRetries) {
+              try {
+                  attempt++;
+      
+                  // ─────[ 6. Module Creation ]───────────────────────
+                  const module = await this.createModule(moduleConfig);
+      
+                  if (!module) {
+                      throw new Error(`[Init] Failed to create instance for module "${moduleName}".`);
+                  }
+      
+                  // ─────[ 7. Health Check ]──────────────────────────
+                  await this.validateModuleHealth(module);
+      
+                  // ─────[ 8. Event Handlers ]────────────────────────
+                  await this.registerModuleEventHandlers(module);
+      
+                  // ─────[ 9. State Setup ]───────────────────────────
+                  await this.initializeModuleState(module);
+      
+                  // ─────[ 10. Metrics Binding ]──────────────────────
+                  await this.startModuleMetrics(module);
+      
+                  // ─────[ 11. Optional Lifecycle Hook: onInit ]──────
+                  if (typeof module.onInit === 'function') {
+                      await module.onInit();
+                  }
+      
+                  // ─────[ 12. Dependency Checks ]────────────────────
+                  if (module.dependencies) {
+                      for (const dep of module.dependencies) {
+                          if (!this.modules.has(dep)) {
+                              throw new Error(`[Init] Dependency "${dep}" missing for module "${moduleName}".`);
+                          }
+                      }
+                  }
+      
+                  // ─────[ 13. Register Module ]──────────────────────
+                  this.modules.set(moduleName, module);
+      
+                  // ─────[ 14. Success Log + Duration ]───────────────
+                  const duration = Date.now() - startTime;
+                  this.logger.info(`[Init] Module "${moduleName}" initialized in ${duration}ms.`);
+      
+                  // ─────[ 15. Optional Metrics Emit ]────────────────
+                  if (this.metricsCollector?.recordMetric) {
+                      this.metricsCollector.recordMetric('module_init_duration', duration, { module: moduleName });
+                  }
+      
+                  // ─────[ 16. Optional Hook: notify success ]────────
+                  if (typeof this.notifier?.onModuleInitialized === 'function') {
+                      this.notifier.onModuleInitialized(moduleName);
+                  }
+      
+                  // ─────[ 17. Exit Success ]─────────────────────────
+                  return;
+      
+              } catch (err: any) {
+                  const isFinalAttempt = attempt === maxRetries;
+      
+                  // ─────[ 18. Error Handling ]──────────────────────
+                  this.logger.error(`[Init] Module "${moduleName}" failed on attempt ${attempt}: ${err.message}`);
+      
+                  // ─────[ 19. Error Tracking Integration ]──────────
+                  if (this.errorHandler?.capture) {
+                      this.errorHandler.capture(err, {
+                          context: 'module_initialize',
+                          module: moduleName,
+                          attempt,
+                      });
+                  }
+      
+                  // ─────[ 20. Retry or Exit ]────────────────────────
+                  if (!isFinalAttempt) {
+                      const backoffMs = attempt * 1000;
+                      this.logger.warn(`[Init] Retrying module "${moduleName}" in ${backoffMs}ms...`);
+                      await this.delay(backoffMs);
+                  } else {
+                      this.logger.fatal(`[Init] Module "${moduleName}" failed after ${maxRetries} attempt(s).`);
+                      throw err;
+                  }
+              }
+          }
+      }
+      
+      // ─────[ 21. Helper: Delay ]────────────────────────────────────
+      private async delay(ms: number): Promise<void> {
+          return new Promise(resolve => setTimeout(resolve, ms));
+      }
+      
 
         private async handleModuleInitializationError(
             moduleName: string,
