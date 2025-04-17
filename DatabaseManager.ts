@@ -41,6 +41,10 @@ interface QueryPlanAnalysis {
     rows: number;
     width: number;
     plans: QueryPlan[];
+    optimizationSuggestions: any[];
+    executionRisks: any[];
+    indexRecommendations: any[];
+    statisticsRecommendations: any[];
 }
 
 interface PartitionConfig {
@@ -570,13 +574,161 @@ class DatabaseManager {
         }
     }
 
-    private analyzePlan(plan: any): QueryPlanAnalysis {
-        return {
+    private async analyzePlan(plan: any): Promise<QueryPlanAnalysis> {
+        const analysis: QueryPlanAnalysis = {
             cost: this.calculatePlanCost(plan),
             rows: this.estimateResultRows(plan),
             width: plan['Plan Width'] || 0,
-            plans: this.extractSubPlans(plan)
+            plans: this.extractSubPlans(plan),
+            optimizationSuggestions: [],
+            executionRisks: [],
+            indexRecommendations: [],
+            statisticsRecommendations: []
         };
+
+        // Enhanced plan analysis
+        const planType = plan['Node Type'];
+        const planDetails = {
+            nodeType: planType,
+            actualRows: plan['Actual Rows'] || 0,
+            actualTime: plan['Actual Total Time'] || 0,
+            plannedRows: plan['Plan Rows'] || 0,
+            plannedTime: plan['Total Cost'] || 0
+        };
+
+        // Analyze execution risks
+        if (planType === 'Seq Scan' && plan['Relation Name']) {
+            analysis.executionRisks.push({
+                type: 'SequentialScan',
+                severity: 'HIGH',
+                description: `Sequential scan on table ${plan['Relation Name']}`,
+                recommendation: 'Consider adding an index'
+            });
+        }
+
+        if (planType === 'Nested Loop' && plan['Inner Rows Removed by Join Filter'] > 1000) {
+            analysis.executionRisks.push({
+                type: 'IneffientJoin',
+                severity: 'MEDIUM',
+                description: 'Large number of rows filtered in nested loop',
+                recommendation: 'Consider using a different join type'
+            });
+        }
+
+        // Generate optimization suggestions
+        if (plan['Filter'] && plan['Rows Removed by Filter'] > 1000) {
+            analysis.optimizationSuggestions.push({
+                type: 'HighFilterImpact',
+                description: `Large number of rows removed by filter: ${plan['Filter']}`,
+                suggestion: 'Consider adding an index on filtered columns'
+            });
+        }
+
+        if (plan['Hash Cond'] && plan['Rows Removed by Join Filter'] > 5000) {
+            analysis.optimizationSuggestions.push({
+                type: 'JoinEfficiency',
+                description: 'Inefficient join condition',
+                suggestion: 'Review join conditions and table statistics'
+            });
+        }
+
+        // Add index recommendations
+        if (planType === 'Seq Scan' && plan['Filter']) {
+            const columns = this.extractFilterColumns(plan['Filter']);
+            analysis.indexRecommendations.push({
+                table: plan['Relation Name'],
+                columns: columns,
+                reason: 'Improve filter performance',
+                estimatedImpact: 'HIGH'
+            });
+        }
+
+        // Analyze statistics
+        if (Math.abs(planDetails.actualRows - planDetails.plannedRows) > 
+            planDetails.plannedRows * 0.5) {
+            analysis.statisticsRecommendations.push({
+                table: plan['Relation Name'],
+                description: 'Statistics may be outdated',
+                recommendation: 'Run ANALYZE on the table'
+            });
+        }
+
+        return analysis;
+    }
+
+    private extractFilterColumns(filter: string): string[] {
+        const columnPattern = /([a-zA-Z_][a-zA-Z0-9_]*)\s*[=><]/g;
+        const matches = filter.match(columnPattern) || [];
+        return matches.map(match => match.replace(/[=><\s]/g, ''));
+    }
+
+    private async optimizeQuery(sql: string, params: any[]): Promise<OptimizationResult> {
+        const startTime = Date.now();
+        const originalPlan = await this.analyzeQueryPlan(sql, params);
+        
+        const optimizations: QueryOptimization[] = [];
+        let optimizedSql = sql;
+
+        try {
+            // Analyze and optimize table statistics
+            await this.updateTableStatistics(this.extractTablesFromQuery(sql));
+
+            // Check and suggest indexes
+            const indexSuggestions = await this.suggestIndexes(sql, originalPlan);
+            if (indexSuggestions.length > 0) {
+                optimizations.push({
+                    type: 'IndexSuggestion',
+                    suggestions: indexSuggestions,
+                    estimatedImpact: 'HIGH'
+                });
+            }
+
+            // Analyze JOIN operations
+            const joinOptimizations = this.analyzeJoins(sql, originalPlan);
+            if (joinOptimizations) {
+                optimizations.push(joinOptimizations);
+                optimizedSql = this.rewriteJoins(sql, joinOptimizations);
+            }
+
+            // Check for subquery optimizations
+            const subqueryOptimizations = this.analyzeSubqueries(sql, originalPlan);
+            if (subqueryOptimizations) {
+                optimizations.push(subqueryOptimizations);
+                optimizedSql = this.rewriteSubqueries(sql, subqueryOptimizations);
+            }
+
+            // Analyze WHERE clause
+            const whereOptimizations = this.analyzeWhereClause(sql, params);
+            if (whereOptimizations) {
+                optimizations.push(whereOptimizations);
+                optimizedSql = this.rewriteWhereClause(sql, whereOptimizations);
+            }
+
+            // Check for unnecessary columns
+            const columnOptimizations = this.analyzeColumnUsage(sql);
+            if (columnOptimizations) {
+                optimizations.push(columnOptimizations);
+                optimizedSql = this.rewriteColumnSelection(sql, columnOptimizations);
+            }
+
+            // Analyze the optimized query plan
+            const optimizedPlan = await this.analyzeQueryPlan(optimizedSql, params);
+
+            return {
+                originalSql: sql,
+                optimizedSql,
+                originalPlan,
+                optimizedPlan,
+                optimizations,
+                estimatedImprovement: this.calculateImprovement(originalPlan, optimizedPlan),
+                duration: Date.now() - startTime
+            };
+        } catch (error) {
+            throw new QueryOptimizationError(
+                'Failed to optimize query',
+                { sql, error: error.message }
+            );
+        }
     }
 
     private calculatePlanCost(plan: any): number {

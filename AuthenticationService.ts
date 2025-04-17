@@ -42,53 +42,48 @@ interface AuditLogEntry {
     device: DeviceInfo;
 }
 
-class AuthenticationService {
-    private config: AuthConfig;
-    private tokenManager: TokenManager;
-    private userManager: UserManager;
-    private mfaProvider: MFAProvider;
-    private metrics: MetricsCollector;
-    private biometricConfig: BiometricAuthConfig;
-    private socialAuthConfig: SocialAuthConfig;
-    private auditLogger: AuditLogger;
+import { User, AuthResult, TokenValidationResult, Session } from './types';
+import { SecurityService } from './SecurityService';
+import { UserManager } from './UserManager';
+import { Logger } from './utils/Logger';
 
-    constructor(config: AuthConfig) {
-        this.config = config;
-        this.initializeServices();
-        this.setupMetrics();
-        this.setupSecurityPolicies();
-    }
+export class AuthenticationService {
+    private readonly security: SecurityService;
+    private readonly userManager: UserManager;
+    private readonly logger: Logger;
+    private readonly maxLoginAttempts = 5;
+    private readonly lockoutDuration = 30 * 60 * 1000; // 30 minutes
 
-    private initializeServices(): void {
-        this.tokenManager = new TokenManager({
-            secret: this.config.jwtSecret,
-            expiry: this.config.tokenExpiry
-        });
-
+    constructor() {
+        this.security = new SecurityService();
         this.userManager = new UserManager();
-        
-        if (this.config.mfaEnabled) {
-            this.mfaProvider = new MFAProvider();
-        }
+        this.logger = new Logger('AuthenticationService');
     }
 
-    public async authenticate(
-        username: string,
-        password: string,
-        mfaToken?: string
-    ): Promise<AuthResult> {
-        const authStart = Date.now();
+    public async login(username: string, password: string): Promise<AuthResult> {
+        await this.checkLoginAttempts(username);
 
         try {
-            await this.checkLoginAttempts(username);
-            const user = await this.validateCredentials(username, password);
-            
-            if (this.config.mfaEnabled) {
-                await this.validateMFAToken(user, mfaToken);
+            const user = await this.userManager.findByUsername(username);
+            if (!user) {
+                throw new Error('Invalid credentials');
             }
 
+            const isPasswordValid = await this.security.verifyPassword(
+                password,
+                user.passwordHash
+            );
+
+            if (!isPasswordValid) {
+                await this.handleAuthenticationError(username, new Error('Invalid password'));
+                throw new Error('Invalid credentials');
+            }
+
+            await this.validateMFAToken(user);
             const session = await this.createSession(user);
-            await this.recordSuccessfulLogin(user, authStart);
+
+            await this.userManager.updateLastLogin(user.id);
+            await this.security.clearLoginAttempts(username);
 
             return {
                 success: true,
@@ -96,443 +91,101 @@ class AuthenticationService {
                 user: this.sanitizeUser(user)
             };
         } catch (error) {
-            await this.handleAuthenticationError(username, error);
+            this.logger.error('Login failed', { username, error: error.message });
             throw error;
-        }
-    }
-
-    private async validateCredentials(
-        username: string,
-        password: string
-    ): Promise<User> {
-        const user = await this.userManager.findByUsername(username);
-        
-        if (!user) {
-            throw new AuthenticationError('Invalid credentials');
-        }
-
-        if (user.status !== 'active') {
-            throw new AccountStatusError(`Account is ${user.status}`);
-        }
-
-        const isValid = await this.verifyPassword(password, user.password);
-        if (!isValid) {
-            await this.handleInvalidPassword(user);
-            throw new AuthenticationError('Invalid credentials');
-        }
-
-        return user;
-    }
-
-    private async verifyPassword(
-        password: string,
-        hashedPassword: string
-    ): Promise<boolean> {
-        const [salt, hash] = hashedPassword.split('.');
-        const computedHash = await this.hashPassword(password, salt);
-        return computedHash === hash;
-    }
-
-    private async hashPassword(
-        password: string,
-        salt: string = randomBytes(16).toString('hex')
-    ): Promise<string> {
-        const hash = createHmac('sha256', salt)
-            .update(password)
-            .digest('hex');
-
-        return `${salt}.${hash}`;
-    }
-
-    private async validateMFAToken(
-        user: User,
-        token?: string
-    ): Promise<void> {
-        if (!token) {
-            throw new MFARequiredError('MFA token is required');
-        }
-
-        const isValid = await this.mfaProvider.validateToken(user.id, token);
-        if (!isValid) {
-            throw new MFAValidationError('Invalid MFA token');
-        }
-    }
-
-    private async createSession(user: User): Promise<Session> {
-        const session = {
-            id: randomBytes(16).toString('hex'),
-            userId: user.id,
-            createdAt: new Date(),
-            expiresAt: new Date(Date.now() + this.config.tokenExpiry),
-            device: this.getCurrentDevice()
-        };
-
-        const token = await this.tokenManager.createToken({
-            sub: user.id,
-            jti: session.id,
-            exp: Math.floor(session.expiresAt.getTime() / 1000)
-        });
-
-        await this.userManager.saveSession(session);
-        return { ...session, token };
-    }
-
-    private getCurrentDevice(): DeviceInfo {
-        return {
-            ip: this.getClientIP(),
-            userAgent: this.getUserAgent(),
-            fingerprint: this.getDeviceFingerprint()
-        };
-    }
-
-    private async checkLoginAttempts(username: string): Promise<void> {
-        const attempts = await this.userManager.getLoginAttempts(username);
-        
-        if (attempts.count >= this.config.maxLoginAttempts) {
-            const lockoutEnd = attempts.lastAttempt.getTime() + 
-                this.config.lockoutDuration;
-
-            if (Date.now() < lockoutEnd) {
-                throw new AccountLockedError(
-                    'Account locked due to too many failed attempts'
-                );
-            }
-
-            await this.userManager.resetLoginAttempts(username);
-        }
-    }
-
-    private async handleAuthenticationError(
-        username: string,
-        error: Error
-    ): Promise<void> {
-        this.logger.warn('Authentication failed', {
-            username,
-            error: error.message,
-            timestamp: new Date()
-        });
-
-        await this.metrics.increment('auth_failures', {
-            username,
-            error: error.name
-        });
-
-        if (error instanceof AuthenticationError) {
-            await this.userManager.incrementLoginAttempts(username);
         }
     }
 
     public async validateToken(token: string): Promise<TokenValidationResult> {
         try {
-            const decoded = await this.tokenManager.verifyToken(token);
-            const session = await this.userManager.getSession(decoded.jti);
+            const decoded = await this.security.verifyToken(token);
+            const session = await this.userManager.getSession(decoded.sessionId);
 
-            if (!session || session.revokedAt) {
-                throw new TokenError('Token has been revoked');
+            if (!session || session.isRevoked) {
+                throw new Error('Invalid session');
             }
 
-            const user = await this.userManager.findById(decoded.sub);
+            const user = await this.userManager.findById(decoded.userId);
             return { valid: true, user: this.sanitizeUser(user) };
         } catch (error) {
-            await this.handleTokenError(error);
-            return { valid: false, error };
+            this.logger.error('Token validation failed', { error: error.message });
+            return { valid: false, error: error.message };
         }
     }
 
-    public async changePassword(
-        userId: string,
-        currentPassword: string,
-        newPassword: string
-    ): Promise<void> {
+    public async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
         const user = await this.userManager.findById(userId);
         
         if (!user) {
-            throw new UserNotFoundError('User not found');
+            throw new Error('User not found');
         }
 
-        const isValid = await this.verifyPassword(
+        const isValid = await this.security.verifyPassword(
             currentPassword,
-            user.password
+            user.passwordHash
         );
 
         if (!isValid) {
-            throw new AuthenticationError('Invalid current password');
+            throw new Error('Invalid current password');
         }
 
-        await this.validatePasswordPolicy(newPassword, user);
-        const hashedPassword = await this.hashPassword(newPassword);
+        await this.validatePasswordPolicy(newPassword);
+        const hashedPassword = await this.security.hashPassword(newPassword);
         
         await this.userManager.updatePassword(userId, hashedPassword);
         await this.revokeAllSessions(userId);
     }
 
-    private async validatePasswordPolicy(
-        password: string,
-        user: User
-    ): Promise<void> {
-        const policy = this.config.passwordPolicy;
-        const errors: string[] = [];
+    private async validatePasswordPolicy(password: string): Promise<void> {
+        const minLength = 8;
+        const hasUpperCase = /[A-Z]/.test(password);
+        const hasLowerCase = /[a-z]/.test(password);
+        const hasNumbers = /\d/.test(password);
+        const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
 
-        if (password.length < policy.minLength) {
-            errors.push(`Password must be at least ${policy.minLength} characters`);
+        if (password.length < minLength) {
+            throw new Error('Password must be at least 8 characters long');
         }
 
-        if (policy.requireUppercase && !/[A-Z]/.test(password)) {
-            errors.push('Password must contain uppercase letters');
-        }
-
-        if (policy.requireLowercase && !/[a-z]/.test(password)) {
-            errors.push('Password must contain lowercase letters');
-        }
-
-        if (policy.requireNumbers && !/\d/.test(password)) {
-            errors.push('Password must contain numbers');
-        }
-
-        if (policy.requireSpecialChars && !/[^A-Za-z0-9]/.test(password)) {
-            errors.push('Password must contain special characters');
-        }
-
-        if (await this.isPasswordPreviouslyUsed(user.id, password)) {
-            errors.push('Password has been previously used');
-        }
-
-        if (errors.length > 0) {
-            throw new PasswordPolicyError(errors.join(', '));
+        if (!hasUpperCase || !hasLowerCase || !hasNumbers || !hasSpecialChar) {
+            throw new Error('Password must contain uppercase, lowercase, numbers and special characters');
         }
     }
 
-    private async isPasswordPreviouslyUsed(
-        userId: string,
-        password: string
-    ): Promise<boolean> {
-        const previousPasswords = await this.userManager
-            .getPreviousPasswords(userId);
+    private async createSession(user: User): Promise<Session> {
+        const token = await this.security.generateToken({
+            userId: user.id,
+            role: user.role
+        });
 
-        for (const prevPassword of previousPasswords) {
-            if (await this.verifyPassword(password, prevPassword)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    public async setupBiometricAuth(userId: string): Promise<BiometricSetupResult> {
-        const user = await this.userManager.findById(userId);
-        if (!user) {
-            throw new UserNotFoundError('User not found');
-        }
-
-        try {
-            const enrollment = await this.biometricProvider.startEnrollment(userId);
-            await this.auditLogger.log({
-                userId,
-                action: 'BIOMETRIC_SETUP_STARTED',
-                metadata: { enrollmentId: enrollment.id }
-            });
-
-            return {
-                enrollmentId: enrollment.id,
-                challenge: enrollment.challenge,
-                validityPeriod: enrollment.validityPeriod
-            };
-        } catch (error) {
-            await this.handleBiometricError(error, userId);
-            throw error;
-        }
-    }
-
-    public async verifyBiometric(
-        userId: string,
-        biometricData: BiometricData
-    ): Promise<BiometricVerificationResult> {
-        const verificationStart = Date.now();
-
-        try {
-            const user = await this.userManager.findById(userId);
-            if (!user) {
-                throw new UserNotFoundError('User not found');
-            }
-
-            const result = await this.biometricProvider.verify(userId, biometricData);
-            await this.recordBiometricAttempt(userId, result, verificationStart);
-
-            if (!result.success) {
-                throw new BiometricVerificationError(result.error);
-            }
-
-            return {
-                success: true,
-                confidenceScore: result.confidenceScore,
-                verificationTime: Date.now() - verificationStart
-            };
-        } catch (error) {
-            await this.handleBiometricError(error, userId);
-            throw error;
-        }
-    }
-
-    public async initiateSocialAuth(
-        provider: string,
-        redirectUrl: string
-    ): Promise<SocialAuthInitResult> {
-        const oauthProvider = this.socialAuthConfig.providers.get(provider);
-        if (!oauthProvider) {
-            throw new UnsupportedProviderError(`Provider ${provider} not supported`);
-        }
-
-        const state = await this.generateSecureState();
-        await this.storeSocialAuthState(state, provider, redirectUrl);
-
-        return {
-            authUrl: oauthProvider.getAuthorizationUrl(state),
-            state,
-            expiresIn: this.socialAuthConfig.stateTimeout
-        };
-    }
-
-    private async generateSecureState(): Promise<string> {
-        const buffer = await promisify(randomBytes)(32);
-        return buffer.toString('hex');
-    }
-
-    public async completeSocialAuth(
-        provider: string,
-        code: string,
-        state: string
-    ): Promise<AuthResult> {
-        const storedState = await this.retrieveSocialAuthState(state);
-        if (!storedState || storedState.provider !== provider) {
-            throw new InvalidStateError('Invalid or expired state');
-        }
-
-        const oauthProvider = this.socialAuthConfig.providers.get(provider);
-        if (!oauthProvider) {
-            throw new UnsupportedProviderError(`Provider ${provider} not supported`);
-        }
-
-        try {
-            const tokenResponse = await oauthProvider.exchangeCode(code);
-            const userInfo = await oauthProvider.getUserInfo(tokenResponse.accessToken);
-            
-            const user = await this.findOrCreateSocialUser(provider, userInfo);
-            const session = await this.createSession(user);
-
-            await this.auditLogger.log({
-                userId: user.id,
-                action: 'SOCIAL_AUTH_SUCCESS',
-                metadata: { provider }
-            });
-
-            return {
-                success: true,
-                token: session.token,
-                user: this.sanitizeUser(user)
-            };
-        } catch (error) {
-            await this.handleSocialAuthError(error, provider);
-            throw error;
-        }
-    }
-
-    private async findOrCreateSocialUser(
-        provider: string,
-        userInfo: SocialUserInfo
-    ): Promise<User> {
-        const existingUser = await this.userManager.findBySocialId(
-            provider,
-            userInfo.id
-        );
-
-        if (existingUser) {
-            await this.updateSocialUserInfo(existingUser, userInfo);
-            return existingUser;
-        }
-
-        return await this.createSocialUser(provider, userInfo);
-    }
-
-    private async updateSocialUserInfo(
-        user: User,
-        userInfo: SocialUserInfo
-    ): Promise<void> {
-        const updates: Partial<User> = {
-            email: userInfo.email || user.email,
-            name: userInfo.name || user.name,
-            avatarUrl: userInfo.avatarUrl || user.avatarUrl,
-            lastLoginAt: new Date()
-        };
-
-        await this.userManager.updateUser(user.id, updates);
-    }
-
-    private async createSocialUser(
-        provider: string,
-        userInfo: SocialUserInfo
-    ): Promise<User> {
-        const user: NewUser = {
-            email: userInfo.email,
-            name: userInfo.name,
-            socialIds: { [provider]: userInfo.id },
-            avatarUrl: userInfo.avatarUrl,
-            status: 'active',
+        const session = {
+            id: crypto.randomUUID(),
+            userId: user.id,
+            token,
             createdAt: new Date(),
-            lastLoginAt: new Date()
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+            isRevoked: false,
+            device: this.getCurrentDevice()
         };
 
-        return await this.userManager.createUser(user);
+        await this.userManager.saveSession(session);
+        return session;
     }
 
-    public async revokeAllSessions(userId: string): Promise<void> {
-        const sessions = await this.userManager.getUserSessions(userId);
-        
-        await Promise.all(
-            sessions.map(session => this.revokeSession(session.id))
-        );
-
-        await this.auditLogger.log({
-            userId,
-            action: 'ALL_SESSIONS_REVOKED',
-            metadata: { sessionCount: sessions.length }
-        });
-    }
-
-    private async revokeSession(sessionId: string): Promise<void> {
-        await this.userManager.revokeSession(sessionId);
-        await this.tokenManager.revokeToken(sessionId);
-        await this.metrics.increment('sessions_revoked');
-    }
-
-    public async getLoginHistory(
-        userId: string,
-        options: HistoryOptions = {}
-    ): Promise<AuditLogEntry[]> {
-        const logs = await this.auditLogger.query({
-            userId,
-            actions: ['LOGIN_SUCCESS', 'LOGIN_FAILURE'],
-            startDate: options.startDate,
-            endDate: options.endDate,
-            limit: options.limit || 10
-        });
-
-        return logs.map(log => ({
-            ...log,
-            device: this.enrichDeviceInfo(log.device)
-        }));
-    }
-
-    private enrichDeviceInfo(device: DeviceInfo): EnrichedDeviceInfo {
+    private getCurrentDevice(): any {
         return {
-            ...device,
-            location: this.getLocationFromIP(device.ip),
-            browser: this.parseUserAgent(device.userAgent),
-            riskScore: this.calculateDeviceRiskScore(device)
+            type: 'web',
+            userAgent: 'browser',
+            ip: '127.0.0.1',
+            timestamp: new Date()
         };
+    }
+
+    private sanitizeUser(user: User): Partial<User> {
+        const { passwordHash, ...safeUser } = user;
+        return safeUser;
     }
 }
-
-export default AuthenticationService;
 
 import {
     arrayFrom,

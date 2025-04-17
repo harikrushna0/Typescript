@@ -1,5 +1,10 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import { Notification, NotificationChannel, NotificationTemplate } from './types';
+import { EmailProvider } from './providers/EmailProvider';
+import { SMSProvider } from './providers/SMSProvider';
+import { PushProvider } from './providers/PushProvider';
+import { Logger } from './utils/Logger';
 
 interface WorkflowDefinition {
     id: string;
@@ -265,6 +270,137 @@ class WorkflowEngine extends EventEmitter {
         });
 
         await this.executeWorkflow(instance);
+    }
+}
+
+export class NotificationService {
+    private readonly emailProvider: EmailProvider;
+    private readonly smsProvider: SMSProvider;
+    private readonly pushProvider: PushProvider;
+    private readonly logger: Logger;
+    private readonly templates: Map<string, NotificationTemplate>;
+
+    constructor() {
+        this.emailProvider = new EmailProvider();
+        this.smsProvider = new SMSProvider();
+        this.pushProvider = new PushProvider();
+        this.logger = new Logger('NotificationService');
+        this.templates = new Map();
+        this.loadTemplates();
+    }
+
+    public async send(notification: Notification): Promise<boolean> {
+        try {
+            const template = this.templates.get(notification.templateId);
+            if (!template) {
+                throw new Error(`Template ${notification.templateId} not found`);
+            }
+
+            const content = this.processTemplate(template, notification.data);
+            await this.validateContent(content);
+
+            const results = await Promise.all(
+                notification.channels.map(channel =>
+                    this.sendToChannel(channel, content, notification)
+                )
+            );
+
+            const success = results.every(result => result);
+            await this.logNotification(notification, success);
+
+            return success;
+        } catch (error) {
+            this.logger.error('Failed to send notification', {
+                error: error.message,
+                notification
+            });
+            return false;
+        }
+    }
+
+    private async sendToChannel(
+        channel: NotificationChannel,
+        content: string,
+        notification: Notification
+    ): Promise<boolean> {
+        try {
+            switch (channel) {
+                case 'email':
+                    return await this.sendEmail(notification.recipient, content);
+                case 'sms':
+                    return await this.sendSMS(notification.recipient, content);
+                case 'push':
+                    return await this.sendPush(notification.recipient, content);
+                default:
+                    throw new Error(`Unsupported channel: ${channel}`);
+            }
+        } catch (error) {
+            this.logger.error(`Failed to send to ${channel}`, {
+                error: error.message,
+                notification
+            });
+            return false;
+        }
+    }
+
+    private async sendEmail(recipient: string, content: string): Promise<boolean> {
+        try {
+            await this.emailProvider.send({
+                to: recipient,
+                subject: content.substring(0, 100),
+                body: content,
+                isHtml: true
+            });
+            return true;
+        } catch (error) {
+            this.logger.error('Email sending failed', {
+                recipient,
+                error: error.message
+            });
+            return false;
+        }
+    }
+
+    private async sendSMS(recipient: string, content: string): Promise<boolean> {
+        try {
+            await this.smsProvider.send({
+                to: recipient,
+                message: content.substring(0, 160)
+            });
+            return true;
+        } catch (error) {
+            this.logger.error('SMS sending failed', {
+                recipient,
+                error: error.message
+            });
+            return false;
+        }
+    }
+
+    private async sendPush(recipient: string, content: string): Promise<boolean> {
+        try {
+            await this.pushProvider.send({
+                userId: recipient,
+                title: content.substring(0, 50),
+                body: content,
+                data: { type: 'notification' }
+            });
+            return true;
+        } catch (error) {
+            this.logger.error('Push notification failed', {
+                recipient,
+                error: error.message
+            });
+            return false;
+        }
+    }
+
+    private processTemplate(template: NotificationTemplate, data: any): string {
+        let content = template.content;
+        Object.entries(data).forEach(([key, value]) => {
+            content = content.replace(`{{${key}}}`, String(value));
+        });
+        return content;
     }
 }
 
@@ -1573,3 +1709,4 @@ interface Product {
         description: Diagnostics.Include_source_code_in_the_sourcemaps_inside_the_emitted_JavaScript,
         defaultValueDescription: false,
     },
+];
