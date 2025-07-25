@@ -29,30 +29,30 @@ import {
 import { postMessage } from "./../shared/vscode/vscode-api";
 import { transformText } from "../shared/data/Description";
 
-// type Analysis = {
-//   response: any;
-//   analysisId: number;
-//   fileName: string;
-//   factor: string;
-//   feedback: string;
-//   running: boolean;
-//   language:any;
-//   error: any;
-// };
+type Analysis = {
+  response: any;
+  analysisId: number;
+  fileName: string;
+  factor: string;
+  feedback: string;
+  running: boolean;
+  language:any;
+  error: any;
+};
 
-// type oldAnalysis = {
-//   loading: boolean;
-//   error: any;
-//   analysis: {
-//     response: any;
-//     analysisId: number;
-//     fileName: string;
-//     factor: string;
-//     feedback: string;
-//     running: boolean;
-//     error: any;
-//   };
-// };
+type oldAnalysis = {
+  loading: boolean;
+  error: any;
+  analysis: {
+    response: any;
+    analysisId: number;
+    fileName: string;
+    factor: string;
+    feedback: string;
+    running: boolean;
+    error: any;
+  };
+};
 
 const Home: React.FC = () => {
   const { userId } = useSelector(selectUser);
